@@ -8,32 +8,16 @@
 <script src="https://unpkg.com/htmx.org@1.9.12"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+{{template "theme_script" .}}
 <style>
-  :root{
-    --bg:         #0c0f12;
-    --panel:      #14181d;
-    --panel-2:    #191e24;
-    --border:     #232a32;
-    --text:       #e7ebee;
-    --text-dim:   #8b96a1;
-    --text-faint: #566068;
-    --accent:     #5fd4c4;
-    --accent-dim: #2f6d64;
-    --warn:       #e8a33d;
-    --danger:     #e05a5a;
-    --radius:     6px;
-    --mono: 'IBM Plex Mono', ui-monospace, monospace;
-    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
-  }
+  {{template "theme_vars" .}}
   * { box-sizing: border-box; }
   body{
     margin:0;
     background:var(--bg);
     color:var(--text);
     font-family:var(--sans);
-    background-image:
-      radial-gradient(circle at 15% -10%, rgba(95,212,196,0.06), transparent 40%),
-      var(--web-lines);
+    background-image: radial-gradient(circle at 15% -10%, rgba(95,212,196,0.06), transparent 40%);
   }
 
   /* --- signature: faint cobweb/mesh lines behind the header, drawn once as inline SVG bg --- */
@@ -158,9 +142,9 @@
     border:1px solid var(--border);
   }
   .badge.ok{ color:var(--accent); border-color:var(--accent-dim); }
-  .badge.warn{ color:var(--warn); border-color:#5c481f; }
+  .badge.warn{ color:var(--warn); border-color:var(--warn-border); }
   .badge.off{ color:var(--text-faint); }
-  .badge.reserved{ color:#9c8cf0; border-color:#4a3f7a; }
+  .badge.reserved{ color:var(--reserved); border-color:var(--reserved-border); }
   .dot{ width:6px; height:6px; border-radius:50%; background:currentColor; }
   .dot.pulse{ animation:pulse 2s ease-in-out infinite; }
   @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.35;} }
@@ -186,14 +170,6 @@
     border-bottom:1px solid var(--border);
   }
   .devices-header h2{ margin:0; font-size:14.5px; font-weight:600; }
-  .live-tag{
-    font-family:var(--mono);
-    font-size:11px;
-    color:var(--text-faint);
-    display:flex;
-    align-items:center;
-    gap:6px;
-  }
 
   .iface-name{ font-family:var(--mono); font-size:13px; color:var(--text-faint); }
   .iface-role{ font-size:15px; font-weight:600; margin:2px 0 12px; }
@@ -228,7 +204,6 @@
     <div class="devices-panel">
       <div class="devices-header">
         <h2>Connected devices</h2>
-        <span class="live-tag"><span class="dot pulse" style="color:var(--accent)"></span> live · updates every 5s</span>
       </div>
       <table>
         <thead>

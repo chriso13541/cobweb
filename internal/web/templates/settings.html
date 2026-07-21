@@ -7,15 +7,9 @@
 <title>cobweb · settings</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+{{template "theme_script" .}}
 <style>
-  :root{
-    --bg: #0c0f12; --panel: #14181d; --panel-2: #191e24; --border: #232a32;
-    --text: #e7ebee; --text-dim: #8b96a1; --text-faint: #566068;
-    --accent: #5fd4c4; --accent-dim: #2f6d64; --warn: #e8a33d; --danger: #e05a5a;
-    --radius: 6px;
-    --mono: 'IBM Plex Mono', ui-monospace, monospace;
-    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
-  }
+  {{template "theme_vars" .}}
   *{ box-sizing:border-box; }
   body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); }
   .header{
@@ -55,6 +49,7 @@
     margin-bottom:16px;
   }
   input:focus{ outline:none; border-color:var(--accent-dim); }
+  input::placeholder{ color:var(--text-faint); opacity:0.7; }
 
   .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
   .grid3{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:0 12px; align-items:start; }
@@ -62,12 +57,12 @@
 
   button, .btn{
     font-family:var(--sans); font-size:13.5px; font-weight:600; cursor:pointer;
-    background:var(--accent-dim); color:#e7fbf7; border:1px solid var(--accent-dim);
+    background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
     padding:9px 16px; border-radius:var(--radius);
   }
-  button:hover{ background:var(--accent); border-color:var(--accent); color:#08201c; }
-  button.danger{ background:transparent; border-color:#5c2a2a; color:var(--danger); padding:6px 10px; font-size:12px; }
-  button.danger:hover{ background:#3a1414; }
+  button:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
+  button.danger{ background:transparent; border-color:var(--danger-border); color:var(--danger); padding:6px 10px; font-size:12px; }
+  button.danger:hover{ background:var(--danger-bg); }
 
   table{ width:100%; border-collapse:collapse; margin-top:4px; }
   thead th{
@@ -78,6 +73,23 @@
   tbody td{ padding:9px 10px; font-size:13px; border-bottom:1px solid var(--border); font-family:var(--mono); }
   tbody tr:last-child td{ border-bottom:none; }
   .empty{ color:var(--text-faint); font-style:italic; padding:14px 4px; font-size:13px; }
+
+  /* --- theme toggle switch --- */
+  .theme-row{ display:flex; align-items:center; justify-content:space-between; }
+  .theme-row .label-text{ font-family:var(--sans); font-size:13.5px; color:var(--text); font-weight:500; }
+  .theme-row .label-sub{ font-family:var(--sans); font-size:12px; color:var(--text-faint); margin-top:2px; }
+  .switch{ position:relative; display:inline-block; width:44px; height:24px; flex-shrink:0; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .switch-track{
+    position:absolute; cursor:pointer; inset:0; background:var(--panel-2);
+    border:1px solid var(--border); border-radius:99px; transition:background 0.15s;
+  }
+  .switch-track::before{
+    content:""; position:absolute; height:16px; width:16px; left:3px; top:2px;
+    background:var(--text-faint); border-radius:50%; transition:transform 0.15s, background 0.15s;
+  }
+  .switch input:checked + .switch-track{ background:var(--accent-dim); border-color:var(--accent-dim); }
+  .switch input:checked + .switch-track::before{ transform:translateX(20px); background:var(--accent); }
 </style>
 </head>
 <body>
@@ -91,6 +103,20 @@
   </div>
 
   <main>
+
+    <div class="section-label">Appearance</div>
+    <div class="panel">
+      <div class="theme-row">
+        <div>
+          <div class="label-text">Light mode</div>
+          <div class="label-sub">Applies on this browser. Dark is the default.</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="theme-toggle" onchange="cobwebSetTheme(this.checked ? 'light' : 'dark')">
+          <span class="switch-track"></span>
+        </label>
+      </div>
+    </div>
 
     <div class="section-label">Network &amp; DHCP</div>
     <div class="panel">
@@ -165,9 +191,9 @@
       </table>
       <form method="post" action="/api/reservations/add" style="margin-top:16px;">
         <div class="grid3">
-          <div><label>Hostname</label><input type="text" name="hostname" placeholder="stronghold"></div>
-          <div><label>MAC address</label><input type="text" name="mac" placeholder="08:62:66:a1:25:44"></div>
-          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.10"></div>
+          <div><label>Hostname</label><input type="text" name="hostname" placeholder="hostname"></div>
+          <div><label>MAC address</label><input type="text" name="mac" placeholder="aa:bb:cc:dd:ee:ff"></div>
+          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.100"></div>
           <div style="padding-top:22px;"><button type="submit">Add</button></div>
         </div>
       </form>
@@ -200,8 +226,8 @@
       </table>
       <form method="post" action="/api/dns/add" style="margin-top:16px;">
         <div class="grid3">
-          <div><label>Name</label><input type="text" name="name" placeholder="nas.lan"></div>
-          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.10"></div>
+          <div><label>Name</label><input type="text" name="name" placeholder="device.lan"></div>
+          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.100"></div>
           <div></div>
           <div style="padding-top:22px;"><button type="submit">Add</button></div>
         </div>

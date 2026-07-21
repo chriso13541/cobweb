@@ -1,0 +1,27 @@
+{{define "theme_script"}}
+<script>
+  // Applied inline in <head>, before body render, so there's no flash
+  // of the wrong theme on load. Dark is the default for anyone who
+  // hasn't chosen a preference yet.
+  (function(){
+    var saved = localStorage.getItem('cobweb-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+  })();
+
+  function cobwebSetTheme(theme){
+    localStorage.setItem('cobweb-theme', theme);
+    document.documentElement.setAttribute('data-theme', theme);
+    var toggle = document.getElementById('theme-toggle');
+    if (toggle) toggle.checked = (theme === 'light');
+  }
+
+  // Sync the toggle's visual state with whatever was applied above,
+  // once the settings page's DOM (if present) is ready.
+  document.addEventListener('DOMContentLoaded', function(){
+    var toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      toggle.checked = (document.documentElement.getAttribute('data-theme') === 'light');
+    }
+  });
+</script>
+{{end}}

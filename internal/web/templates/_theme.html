@@ -1,0 +1,47 @@
+{{define "theme_vars"}}
+  :root, [data-theme="dark"]{
+    --bg:           #0c0f12;
+    --panel:        #14181d;
+    --panel-2:      #191e24;
+    --border:       #232a32;
+    --text:         #e7ebee;
+    --text-dim:     #8b96a1;
+    --text-faint:   #566068;
+    --accent:       #5fd4c4;
+    --accent-dim:   #2f6d64;
+    --accent-text:  #e7fbf7;
+    --accent-hover-text: #08201c;
+    --warn:         #e8a33d;
+    --warn-border:  #5c481f;
+    --danger:       #e05a5a;
+    --danger-bg:    #3a1414;
+    --danger-border:#5c2a2a;
+    --reserved:     #9c8cf0;
+    --reserved-border: #4a3f7a;
+  }
+  [data-theme="light"]{
+    --bg:           #f5f7f6;
+    --panel:        #ffffff;
+    --panel-2:      #eef2f0;
+    --border:       #dbe3df;
+    --text:         #16211f;
+    --text-dim:     #56655f;
+    --text-faint:   #8b9891;
+    --accent:       #0f8f7d;
+    --accent-dim:   #bfe8e0;
+    --accent-text:  #ffffff;
+    --accent-hover-text: #ffffff;
+    --warn:         #a8660a;
+    --warn-border:  #e8cfa0;
+    --danger:       #c23d3d;
+    --danger-bg:    #fbeaea;
+    --danger-border:#eec9c9;
+    --reserved:     #6a53c9;
+    --reserved-border: #dad2f5;
+  }
+  :root{
+    --radius: 6px;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
+  }
+{{end}}
