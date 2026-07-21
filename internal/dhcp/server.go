@@ -41,24 +41,37 @@ func (s *Server) Run() error {
 	s.conn = conn
 	defer conn.Close()
 
-	// Replies to clients that don't have an IP yet must go out as
-	// broadcast (255.255.255.255:68). The kernel refuses broadcast
-	// sends on a UDP socket unless SO_BROADCAST is explicitly set.
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
 		return fmt.Errorf("dhcp: syscall conn: %w", err)
 	}
+
+	lanIf := s.cfg.Snapshot().LANInterface
 	var sockErr error
 	if err := rawConn.Control(func(fd uintptr) {
+		// Replies to clients that don't have an IP yet must go out as
+		// broadcast. The kernel refuses broadcast sends on a UDP socket
+		// unless SO_BROADCAST is explicitly set.
 		sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+		if sockErr != nil {
+			return
+		}
+		// This box has two interfaces (WAN + LAN). Without binding the
+		// socket to a specific device, the kernel has no unambiguous
+		// route for a broadcast destination and replies can silently
+		// go out the wrong interface (or get dropped), which is why
+		// clients would see occasional OFFERs but rarely complete the
+		// handshake. Binding to the LAN interface makes sure every
+		// send/receive on this socket only ever happens there.
+		sockErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, lanIf)
 	}); err != nil {
 		return fmt.Errorf("dhcp: control: %w", err)
 	}
 	if sockErr != nil {
-		return fmt.Errorf("dhcp: set SO_BROADCAST: %w", sockErr)
+		return fmt.Errorf("dhcp: socket setup (SO_BROADCAST/SO_BINDTODEVICE on %s): %w", lanIf, sockErr)
 	}
 
-	log.Printf("dhcp: listening on :67")
+	log.Printf("dhcp: listening on :67 (bound to %s)", lanIf)
 
 	buf := make([]byte, 1500)
 	for {
@@ -206,14 +219,32 @@ func (s *Server) serverIP() net.IP {
 }
 
 // send broadcasts the reply. Home-network DHCP clients before they have
-// an address can only be reached via broadcast, so this always targets
-// 255.255.255.255:68 rather than trying to unicast to an address the
-// client doesn't have yet.
+// an address can only be reached via broadcast. It targets the LAN
+// subnet's own directed broadcast address (e.g. 192.168.2.255) rather
+// than the global 255.255.255.255 - combined with SO_BINDTODEVICE in
+// Run, this guarantees the reply goes out the LAN interface only.
 func (s *Server) send(b []byte) {
-	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: 68}
+	snap := s.cfg.Snapshot()
+	bcast := directedBroadcast(net.ParseIP(snap.LANAddress), net.ParseIP(snap.SubnetMask))
+	dst := &net.UDPAddr{IP: bcast, Port: 68}
 	if _, err := s.conn.WriteToUDP(b, dst); err != nil {
 		log.Printf("dhcp: send error: %v", err)
 	}
+}
+
+// directedBroadcast computes the broadcast address for a given IP and
+// subnet mask, e.g. 192.168.2.1 + 255.255.255.0 -> 192.168.2.255.
+func directedBroadcast(ip, mask net.IP) net.IP {
+	ip4 := ip.To4()
+	mask4 := mask.To4()
+	if ip4 == nil || mask4 == nil {
+		return net.IPv4bcast // fall back to global broadcast if config is malformed
+	}
+	out := make(net.IP, 4)
+	for i := 0; i < 4; i++ {
+		out[i] = ip4[i] | ^mask4[i]
+	}
+	return out
 }
 
 func cloneIP(ip net.IP) net.IP {
