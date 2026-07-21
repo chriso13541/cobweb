@@ -55,6 +55,16 @@
   .grid3{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:0 12px; align-items:start; }
   @media (max-width:640px){ .grid2, .grid3{ grid-template-columns:1fr; } }
 
+  .mode-options{ display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+  .mode-option{
+    display:flex; align-items:flex-start; gap:10px; cursor:pointer;
+    background:var(--panel-2); border:1px solid var(--border); border-radius:var(--radius);
+    padding:11px 13px;
+  }
+  .mode-option input{ margin-top:3px; width:auto; }
+  .mode-title{ font-family:var(--sans); font-size:13.5px; font-weight:600; color:var(--text); }
+  .mode-desc{ font-family:var(--sans); font-size:12px; color:var(--text-faint); margin-top:2px; line-height:1.4; }
+
   button, .btn{
     font-family:var(--sans); font-size:13.5px; font-weight:600; cursor:pointer;
     background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
@@ -185,7 +195,26 @@
             <input type="text" name="domain" value="{{.Domain}}">
           </div>
         </div>
-        <label>Upstream DNS servers (comma-separated, host:port)</label>
+
+        <label>DNS resolution mode</label>
+        <div class="mode-options">
+          <label class="mode-option">
+            <input type="radio" name="dns_mode" value="forward" {{if ne .DNSMode "recursive"}}checked{{end}}>
+            <div>
+              <div class="mode-title">Forward to upstream</div>
+              <div class="mode-desc">Fast, simple. Queries go to the servers below (Cloudflare/Quad9 by default), which do see them.</div>
+            </div>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="dns_mode" value="recursive" {{if eq .DNSMode "recursive"}}checked{{end}}>
+            <div>
+              <div class="mode-title">Recursive resolver</div>
+              <div class="mode-desc">Queries root and authoritative servers directly - no single upstream sees your full browsing history. Slightly slower on first lookup; cached after that.</div>
+            </div>
+          </label>
+        </div>
+
+        <label>Upstream DNS servers (comma-separated, host:port) - used in forward mode, and as a fallback if recursive resolution fails</label>
         <input type="text" name="upstream_servers" value="{{join .UpstreamServers ", "}}">
         <button type="submit">Save network settings</button>
       </form>

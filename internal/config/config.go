@@ -58,7 +58,8 @@ type Config struct {
 
 	// DNS
 	Domain          string   `json:"domain"`           // local suffix, e.g. "lan"
-	UpstreamServers []string `json:"upstream_servers"` // e.g. ["1.1.1.1:53", "9.9.9.9:53"]
+	DNSMode         string   `json:"dns_mode"`         // "forward" (default) or "recursive"
+	UpstreamServers []string `json:"upstream_servers"` // e.g. ["1.1.1.1:53", "9.9.9.9:53"] - used when dns_mode is "forward"
 
 	// Dashboard
 	ListenAddr string `json:"listen_addr"`
@@ -84,6 +85,7 @@ func Default(path string) *Config {
 		PoolEnd:         "192.168.2.254",
 		LeaseSeconds:    86400,
 		Domain:          "lan",
+		DNSMode:         "forward",
 		UpstreamServers: []string{"1.1.1.1:53", "9.9.9.9:53"},
 		ListenAddr:      "0.0.0.0:8070",
 		Reservations:    []Reservation{},
@@ -150,6 +152,7 @@ type Snapshot struct {
 	PoolEnd         string
 	LeaseSeconds    int
 	Domain          string
+	DNSMode         string
 	UpstreamServers []string
 	ListenAddr      string
 	Reservations    []Reservation
@@ -172,6 +175,7 @@ func (c *Config) Snapshot() Snapshot {
 		PoolEnd:         c.PoolEnd,
 		LeaseSeconds:    c.LeaseSeconds,
 		Domain:          c.Domain,
+		DNSMode:         c.DNSMode,
 		UpstreamServers: append([]string{}, c.UpstreamServers...),
 		ListenAddr:      c.ListenAddr,
 		Reservations:    append([]Reservation{}, c.Reservations...),
@@ -298,7 +302,7 @@ func (c *Config) IPInUse(ip string, excludeMAC string) bool {
 
 // UpdateNetwork applies new network/DHCP/DNS settings from the settings
 // page in one atomic write.
-func (c *Config) UpdateNetwork(wan, lan, lanAddr, mask, poolStart, poolEnd, domain string, leaseSeconds int, upstream []string) error {
+func (c *Config) UpdateNetwork(wan, lan, lanAddr, mask, poolStart, poolEnd, domain, dnsMode string, leaseSeconds int, upstream []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.WANInterface = wan
@@ -308,6 +312,7 @@ func (c *Config) UpdateNetwork(wan, lan, lanAddr, mask, poolStart, poolEnd, doma
 	c.PoolStart = poolStart
 	c.PoolEnd = poolEnd
 	c.Domain = domain
+	c.DNSMode = dnsMode
 	c.LeaseSeconds = leaseSeconds
 	c.UpstreamServers = upstream
 	return c.saveLocked()

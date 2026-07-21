@@ -460,6 +460,7 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		strings.TrimSpace(r.FormValue("pool_start")),
 		strings.TrimSpace(r.FormValue("pool_end")),
 		strings.TrimSpace(r.FormValue("domain")),
+		strings.TrimSpace(r.FormValue("dns_mode")),
 		leaseSeconds,
 		upstream,
 	)

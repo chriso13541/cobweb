@@ -2,13 +2,12 @@
 // standard library only. It answers A-record queries for names it
 // knows about locally - manually defined records, plus every current
 // DHCP lease's hostname under the configured local domain (e.g.
-// "stronghold.lan") - and transparently forwards anything else to an
-// upstream resolver, relaying the response back byte-for-byte.
-//
-// This is deliberately not a general-purpose DNS implementation: no
-// caching, no recursion, no DNSSEC. It covers exactly what a home
-// gateway needs - local name resolution plus a pass-through to a real
-// resolver for everything else.
+// "stronghold.lan") - and handles everything else one of two ways,
+// per the configured DNSMode: "forward" relays queries to an upstream
+// resolver (Cloudflare/Quad9 by default) byte-for-byte, while
+// "recursive" resolves them itself by walking the real DNS delegation
+// chain (root -> TLD -> authoritative servers), so no single upstream
+// ever sees a full query history.
 package dnsserver
 
 import (
@@ -34,14 +33,15 @@ const (
 
 // Server is a running DNS server.
 type Server struct {
-	cfg  *config.Config
-	conn *net.UDPConn
+	cfg   *config.Config
+	conn  *net.UDPConn
+	cache *recursiveCache
 }
 
 // New creates a DNS server. It does not start listening until Run is
 // called.
 func New(cfg *config.Config) *Server {
-	return &Server{cfg: cfg}
+	return &Server{cfg: cfg, cache: newRecursiveCache()}
 }
 
 // Run binds to UDP :53 and serves requests until the process exits.
@@ -79,18 +79,56 @@ func (s *Server) handle(msg []byte, clientAddr *net.UDPAddr) {
 	}
 
 	if ip, ok := s.lookupLocal(q.name); ok {
-		resp := buildAResponse(msg, q, ip)
+		resp := buildAResponse(msg, q, []net.IP{ip}, 60)
 		s.conn.WriteToUDP(resp, clientAddr)
 		return
 	}
 
-	// Not a name we own locally - forward to upstream and relay the
-	// raw response back verbatim.
+	if s.cfg.Snapshot().DNSMode == "recursive" && q.qtype == qTypeA {
+		s.handleRecursive(msg, q, clientAddr)
+		return
+	}
+
+	// Forward mode (default), or a query type recursive mode doesn't
+	// handle itself (only A records are resolved iteratively; anything
+	// else still goes to upstream even in recursive mode).
 	resp, err := s.forward(msg)
 	if err != nil {
 		log.Printf("dns: forward failed for %q: %v", q.name, err)
 		return
 	}
+	s.conn.WriteToUDP(resp, clientAddr)
+}
+
+// handleRecursive answers a query by walking the real DNS delegation
+// chain itself (see resolveIterative), checking the local cache first
+// so repeat lookups don't pay the multi-hop cost every time.
+func (s *Server) handleRecursive(msg []byte, q *question, clientAddr *net.UDPAddr) {
+	cacheKey := strings.ToLower(q.name) + "|A"
+
+	if ips, ok := s.cache.get(cacheKey); ok {
+		resp := buildAResponse(msg, q, ips, 60)
+		s.conn.WriteToUDP(resp, clientAddr)
+		return
+	}
+
+	answer, err := resolveIterative(q.name, qTypeA)
+	if err != nil {
+		log.Printf("dns: recursive resolution failed for %q: %v", q.name, err)
+		// Fall back to forwarding rather than leaving the client
+		// hanging - a slow/unreachable root server shouldn't mean a
+		// browsing session just breaks.
+		resp, fwdErr := s.forward(msg)
+		if fwdErr != nil {
+			log.Printf("dns: fallback forward also failed for %q: %v", q.name, fwdErr)
+			return
+		}
+		s.conn.WriteToUDP(resp, clientAddr)
+		return
+	}
+
+	s.cache.set(cacheKey, answer.IPs, answer.TTL)
+	resp := buildAResponse(msg, q, answer.IPs, answer.TTL)
 	s.conn.WriteToUDP(resp, clientAddr)
 }
 
@@ -217,33 +255,39 @@ func readName(msg []byte, offset int) (string, int, error) {
 	return strings.Join(labels, "."), i, nil
 }
 
-// buildAResponse constructs a reply to a query for a name we resolve
-// locally, echoing the original question section (as required for the
-// client to match the response) and appending a single A record answer.
-func buildAResponse(query []byte, q *question, ip net.IP) []byte {
-	resp := make([]byte, 0, q.nameEnd+16)
+// buildAResponse constructs a reply to a resolved query, echoing the
+// original question section (as required for the client to match the
+// response) and appending one A record answer per IP in ips.
+func buildAResponse(query []byte, q *question, ips []net.IP, ttl uint32) []byte {
+	resp := make([]byte, 0, q.nameEnd+16*len(ips))
 
 	// Header: same ID as the query, QR=1 (response), RA=1, RCODE=0,
-	// QDCOUNT=1, ANCOUNT=1, NSCOUNT=0, ARCOUNT=0.
+	// QDCOUNT=1, ANCOUNT=len(ips), NSCOUNT=0, ARCOUNT=0.
 	resp = append(resp, query[0], query[1]) // ID
 	flags := uint16(flagQR | flagRA | rcodeOK)
 	resp = append(resp, byte(flags>>8), byte(flags))
 	resp = append(resp, 0, 1) // QDCOUNT
-	resp = append(resp, 0, 1) // ANCOUNT
+	resp = append(resp, byte(len(ips)>>8), byte(len(ips)))
 	resp = append(resp, 0, 0) // NSCOUNT
 	resp = append(resp, 0, 0) // ARCOUNT
 
 	// Echo the original question section verbatim.
 	resp = append(resp, query[12:q.nameEnd]...)
 
-	// Answer: name (as a pointer back to the question's name at offset
-	// 12), type A, class IN, TTL, RDLENGTH, RDATA.
-	resp = append(resp, 0xC0, 0x0C) // pointer to offset 12
-	resp = append(resp, 0, qTypeA)
-	resp = append(resp, 0, qClassIN)
-	resp = append(resp, 0, 0, 0, 60) // TTL: 60s: local records may change on next lease
-	resp = append(resp, 0, 4)        // RDLENGTH
-	resp = append(resp, ip.To4()...)
+	for _, ip := range ips {
+		ip4 := ip.To4()
+		if ip4 == nil {
+			continue // skip anything that isn't a plain IPv4 address
+		}
+		// Answer: name (as a pointer back to the question's name at
+		// offset 12), type A, class IN, TTL, RDLENGTH, RDATA.
+		resp = append(resp, 0xC0, 0x0C)
+		resp = append(resp, 0, qTypeA)
+		resp = append(resp, 0, qClassIN)
+		resp = append(resp, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl))
+		resp = append(resp, 0, 4) // RDLENGTH
+		resp = append(resp, ip4...)
+	}
 
 	return resp
 }
