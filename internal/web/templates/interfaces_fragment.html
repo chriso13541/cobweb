@@ -1,0 +1,30 @@
+{{define "interfaces_fragment.html"}}
+<div class="panel">
+  <div class="iface-name">{{.WAN.Name}}</div>
+  <div class="iface-role">WAN — home network uplink</div>
+  {{if .WAN.Up}}
+    <span class="badge ok"><span class="dot pulse"></span> up · {{.WAN.Speed}}</span>
+  {{else}}
+    <span class="badge off"><span class="dot"></span> down</span>
+  {{end}}
+  <div class="iface-stats">
+    <div class="stat-block"><div class="k">Address</div><div class="v">{{if .WAN.Addr}}{{.WAN.Addr}}{{else}}—{{end}}</div></div>
+    <div class="stat-block"><div class="k">Rx</div><div class="v">{{.WANRx}}</div></div>
+    <div class="stat-block"><div class="k">Tx</div><div class="v">{{.WANTx}}</div></div>
+  </div>
+</div>
+<div class="panel">
+  <div class="iface-name">{{.LAN.Name}}</div>
+  <div class="iface-role">LAN — internal server network</div>
+  {{if .LAN.Up}}
+    <span class="badge ok"><span class="dot pulse"></span> up · {{.LAN.Speed}}</span>
+  {{else}}
+    <span class="badge off"><span class="dot"></span> down</span>
+  {{end}}
+  <div class="iface-stats">
+    <div class="stat-block"><div class="k">Address</div><div class="v">{{if .LAN.Addr}}{{.LAN.Addr}}{{else}}—{{end}}</div></div>
+    <div class="stat-block"><div class="k">Rx</div><div class="v">{{.LANRx}}</div></div>
+    <div class="stat-block"><div class="k">Tx</div><div class="v">{{.LANTx}}</div></div>
+  </div>
+</div>
+{{end}}

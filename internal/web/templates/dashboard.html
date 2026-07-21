@@ -1,0 +1,259 @@
+{{define "dashboard.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cobweb</title>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:         #0c0f12;
+    --panel:      #14181d;
+    --panel-2:    #191e24;
+    --border:     #232a32;
+    --text:       #e7ebee;
+    --text-dim:   #8b96a1;
+    --text-faint: #566068;
+    --accent:     #5fd4c4;
+    --accent-dim: #2f6d64;
+    --warn:       #e8a33d;
+    --danger:     #e05a5a;
+    --radius:     6px;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    background-image:
+      radial-gradient(circle at 15% -10%, rgba(95,212,196,0.06), transparent 40%),
+      var(--web-lines);
+  }
+
+  /* --- signature: faint cobweb/mesh lines behind the header, drawn once as inline SVG bg --- */
+  .header{
+    position:relative;
+    border-bottom:1px solid var(--border);
+    padding:22px 32px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    overflow:hidden;
+    background:
+      linear-gradient(180deg, rgba(95,212,196,0.04), transparent 70%);
+  }
+  .header::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='120' viewBox='0 0 400 120'%3E%3Cg stroke='%235fd4c4' stroke-opacity='0.10' fill='none'%3E%3Cpath d='M0 10 L120 45 L400 5'/%3E%3Cpath d='M0 60 L120 45 L260 90 L400 60'/%3E%3Cpath d='M120 45 L140 120'/%3E%3Cpath d='M260 90 L230 10'/%3E%3Ccircle cx='120' cy='45' r='2.5' fill='%235fd4c4' fill-opacity='0.4'/%3E%3Ccircle cx='260' cy='90' r='2.5' fill='%235fd4c4' fill-opacity='0.4'/%3E%3C/g%3E%3C/svg%3E");
+    background-repeat:no-repeat;
+    background-position:right -20px top -10px;
+    background-size:440px 140px;
+    pointer-events:none;
+  }
+  .brand{
+    display:flex;
+    align-items:baseline;
+    gap:10px;
+    position:relative;
+    z-index:1;
+  }
+  .brand .mark{
+    color:var(--accent);
+    font-family:var(--mono);
+    font-size:20px;
+  }
+  .brand h1{
+    margin:0;
+    font-size:19px;
+    font-weight:600;
+    letter-spacing:0.01em;
+  }
+  .brand .sub{
+    color:var(--text-faint);
+    font-size:12.5px;
+    font-family:var(--mono);
+  }
+  .clock{
+    font-family:var(--mono);
+    font-size:13px;
+    color:var(--text-dim);
+  }
+  .nav-link{
+    font-family:var(--sans);
+    font-size:13.5px;
+    font-weight:500;
+    color:var(--text-dim);
+    text-decoration:none;
+    padding:6px 12px;
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    transition:color 0.15s, border-color 0.15s;
+  }
+  .nav-link:hover{ color:var(--accent); border-color:var(--accent-dim); }
+
+  main{ padding:28px 32px 60px; max-width:1180px; margin:0 auto; }
+
+  .section-label{
+    font-family:var(--mono);
+    font-size:11.5px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-faint);
+    margin:0 0 12px 2px;
+  }
+
+  .iface-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:16px;
+    margin-bottom:32px;
+  }
+  @media (max-width:720px){ .iface-grid{ grid-template-columns:1fr; } }
+
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:18px 20px;
+  }
+
+  table{ width:100%; border-collapse:collapse; }
+  thead th{
+    text-align:left;
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    color:var(--text-faint);
+    font-weight:500;
+    padding:0 14px 10px;
+    border-bottom:1px solid var(--border);
+  }
+  tbody td{
+    padding:11px 14px;
+    font-size:13.5px;
+    border-bottom:1px solid var(--border);
+  }
+  tbody tr:last-child td{ border-bottom:none; }
+  tbody tr:hover{ background:var(--panel-2); }
+  .mono{ font-family:var(--mono); color:var(--text-dim); font-size:13px; }
+  .hostname{ font-weight:500; color:var(--text); }
+
+  .badge{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-family:var(--mono);
+    font-size:11.5px;
+    padding:3px 8px;
+    border-radius:99px;
+    border:1px solid var(--border);
+  }
+  .badge.ok{ color:var(--accent); border-color:var(--accent-dim); }
+  .badge.warn{ color:var(--warn); border-color:#5c481f; }
+  .badge.off{ color:var(--text-faint); }
+  .badge.reserved{ color:#9c8cf0; border-color:#4a3f7a; }
+  .dot{ width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .dot.pulse{ animation:pulse 2s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+  .empty-state{
+    padding:36px 20px;
+    text-align:center;
+    color:var(--text-faint);
+    font-size:13.5px;
+  }
+
+  .devices-panel{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    overflow:hidden;
+  }
+  .devices-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:16px 20px;
+    border-bottom:1px solid var(--border);
+  }
+  .devices-header h2{ margin:0; font-size:14.5px; font-weight:600; }
+  .live-tag{
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--text-faint);
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+
+  .iface-name{ font-family:var(--mono); font-size:13px; color:var(--text-faint); }
+  .iface-role{ font-size:15px; font-weight:600; margin:2px 0 12px; }
+  .iface-stats{ display:flex; gap:22px; margin-top:14px; }
+  .stat-block .k{ font-family:var(--mono); font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.06em; }
+  .stat-block .v{ font-family:var(--mono); font-size:13.5px; margin-top:3px; color:var(--text); }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <span class="mark">◈</span>
+      <h1>cobweb</h1>
+      <span class="sub">router dashboard</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:20px; position:relative; z-index:1;">
+      <a href="/settings" class="nav-link">Settings</a>
+      <div class="clock" id="clock"></div>
+    </div>
+  </div>
+
+  <main>
+    <div class="section-label">Interfaces</div>
+    <div class="iface-grid"
+         hx-get="/fragments/interfaces"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+      <div class="panel"><span class="mono">loading…</span></div>
+      <div class="panel"><span class="mono">loading…</span></div>
+    </div>
+
+    <div class="devices-panel">
+      <div class="devices-header">
+        <h2>Connected devices</h2>
+        <span class="live-tag"><span class="dot pulse" style="color:var(--accent)"></span> live · updates every 5s</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Hostname</th>
+            <th>IP address</th>
+            <th>MAC address</th>
+            <th>Lease</th>
+          </tr>
+        </thead>
+        <tbody hx-get="/fragments/devices" hx-trigger="load, every 5s" hx-swap="innerHTML">
+          <tr><td colspan="4" class="empty-state">loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+<script>
+  function tick(){
+    const el = document.getElementById('clock');
+    el.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>
+{{end}}

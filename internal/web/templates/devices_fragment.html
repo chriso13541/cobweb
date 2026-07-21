@@ -1,0 +1,22 @@
+{{define "devices_fragment.html"}}
+{{if not .Rows}}
+  <tr><td colspan="4" class="empty-state">No devices seen yet. They'll appear here once they request an address.</td></tr>
+{{else}}
+  {{range .Rows}}
+  <tr>
+    <td class="hostname">{{.Hostname}}</td>
+    <td class="mono">{{.IP}}</td>
+    <td class="mono">{{.MAC}}</td>
+    <td>
+      {{if eq .Status "reserved"}}
+        <span class="badge reserved"><span class="dot"></span> reserved</span>
+      {{else if eq .Status "expired"}}
+        <span class="badge warn"><span class="dot"></span> expired</span>
+      {{else}}
+        <span class="badge ok"><span class="dot"></span> {{.TimeLeft}}</span>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+{{end}}
+{{end}}

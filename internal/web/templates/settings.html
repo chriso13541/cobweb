@@ -1,0 +1,214 @@
+{{define "settings.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cobweb · settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0c0f12; --panel: #14181d; --panel-2: #191e24; --border: #232a32;
+    --text: #e7ebee; --text-dim: #8b96a1; --text-faint: #566068;
+    --accent: #5fd4c4; --accent-dim: #2f6d64; --warn: #e8a33d; --danger: #e05a5a;
+    --radius: 6px;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); }
+  .header{
+    border-bottom:1px solid var(--border);
+    padding:22px 32px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .mark{ color:var(--accent); font-family:var(--mono); font-size:20px; }
+  .brand h1{ margin:0; font-size:19px; font-weight:600; }
+  .brand .sub{ color:var(--text-faint); font-size:12.5px; font-family:var(--mono); }
+  .nav-link{
+    font-size:13.5px; font-weight:500; color:var(--text-dim); text-decoration:none;
+    padding:6px 12px; border:1px solid var(--border); border-radius:var(--radius);
+  }
+  .nav-link:hover{ color:var(--accent); border-color:var(--accent-dim); }
+
+  main{ padding:28px 32px 60px; max-width:900px; margin:0 auto; }
+  .section-label{
+    font-family:var(--mono); font-size:11.5px; letter-spacing:0.08em; text-transform:uppercase;
+    color:var(--text-faint); margin:0 0 12px 2px;
+  }
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px 22px; margin-bottom:28px;
+  }
+  .panel h2{ margin:0 0 4px; font-size:15px; font-weight:600; }
+  .panel .desc{ margin:0 0 18px; font-size:13px; color:var(--text-faint); }
+
+  label{
+    display:block; font-family:var(--mono); font-size:11px; text-transform:uppercase;
+    letter-spacing:0.05em; color:var(--text-faint); margin-bottom:6px;
+  }
+  input[type=text], input[type=number]{
+    width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:9px 11px; border-radius:var(--radius); font-family:var(--mono); font-size:13.5px;
+    margin-bottom:16px;
+  }
+  input:focus{ outline:none; border-color:var(--accent-dim); }
+
+  .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
+  .grid3{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:0 12px; align-items:start; }
+  @media (max-width:640px){ .grid2, .grid3{ grid-template-columns:1fr; } }
+
+  button, .btn{
+    font-family:var(--sans); font-size:13.5px; font-weight:600; cursor:pointer;
+    background:var(--accent-dim); color:#e7fbf7; border:1px solid var(--accent-dim);
+    padding:9px 16px; border-radius:var(--radius);
+  }
+  button:hover{ background:var(--accent); border-color:var(--accent); color:#08201c; }
+  button.danger{ background:transparent; border-color:#5c2a2a; color:var(--danger); padding:6px 10px; font-size:12px; }
+  button.danger:hover{ background:#3a1414; }
+
+  table{ width:100%; border-collapse:collapse; margin-top:4px; }
+  thead th{
+    text-align:left; font-family:var(--mono); font-size:10.5px; letter-spacing:0.06em;
+    text-transform:uppercase; color:var(--text-faint); font-weight:500;
+    padding:0 10px 8px; border-bottom:1px solid var(--border);
+  }
+  tbody td{ padding:9px 10px; font-size:13px; border-bottom:1px solid var(--border); font-family:var(--mono); }
+  tbody tr:last-child td{ border-bottom:none; }
+  .empty{ color:var(--text-faint); font-style:italic; padding:14px 4px; font-size:13px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <span class="mark">◈</span>
+      <h1>cobweb</h1>
+      <span class="sub">settings</span>
+    </div>
+    <a href="/" class="nav-link">← Dashboard</a>
+  </div>
+
+  <main>
+
+    <div class="section-label">Network &amp; DHCP</div>
+    <div class="panel">
+      <h2>Core configuration</h2>
+      <p class="desc">Changes take effect on the next request - no restart needed.</p>
+      <form method="post" action="/api/network/update">
+        <div class="grid2">
+          <div>
+            <label>WAN interface</label>
+            <input type="text" name="wan_interface" value="{{.WANInterface}}">
+          </div>
+          <div>
+            <label>LAN interface</label>
+            <input type="text" name="lan_interface" value="{{.LANInterface}}">
+          </div>
+          <div>
+            <label>Gateway address (this box)</label>
+            <input type="text" name="lan_address" value="{{.LANAddress}}">
+          </div>
+          <div>
+            <label>Subnet mask</label>
+            <input type="text" name="subnet_mask" value="{{.SubnetMask}}">
+          </div>
+          <div>
+            <label>Pool start</label>
+            <input type="text" name="pool_start" value="{{.PoolStart}}">
+          </div>
+          <div>
+            <label>Pool end</label>
+            <input type="text" name="pool_end" value="{{.PoolEnd}}">
+          </div>
+          <div>
+            <label>Lease duration (seconds)</label>
+            <input type="number" name="lease_seconds" value="{{.LeaseSeconds}}">
+          </div>
+          <div>
+            <label>Local domain suffix</label>
+            <input type="text" name="domain" value="{{.Domain}}">
+          </div>
+        </div>
+        <label>Upstream DNS servers (comma-separated, host:port)</label>
+        <input type="text" name="upstream_servers" value="{{join .UpstreamServers ", "}}">
+        <button type="submit">Save network settings</button>
+      </form>
+    </div>
+
+    <div class="section-label">Static reservations</div>
+    <div class="panel">
+      <h2>DHCP reservations</h2>
+      <p class="desc">A MAC address here always gets the same IP, permanently, regardless of the dynamic pool.</p>
+      <table>
+        <thead><tr><th>Hostname</th><th>MAC</th><th>IP</th><th></th></tr></thead>
+        <tbody>
+          {{if not .Reservations}}
+            <tr><td colspan="4" class="empty">No reservations yet.</td></tr>
+          {{else}}
+            {{range .Reservations}}
+            <tr>
+              <td>{{.Hostname}}</td>
+              <td>{{.MAC}}</td>
+              <td>{{.IP}}</td>
+              <td>
+                <form method="post" action="/api/reservations/remove" style="margin:0;">
+                  <input type="hidden" name="mac" value="{{.MAC}}">
+                  <button type="submit" class="danger">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          {{end}}
+        </tbody>
+      </table>
+      <form method="post" action="/api/reservations/add" style="margin-top:16px;">
+        <div class="grid3">
+          <div><label>Hostname</label><input type="text" name="hostname" placeholder="stronghold"></div>
+          <div><label>MAC address</label><input type="text" name="mac" placeholder="08:62:66:a1:25:44"></div>
+          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.10"></div>
+          <div style="padding-top:22px;"><button type="submit">Add</button></div>
+        </div>
+      </form>
+    </div>
+
+    <div class="section-label">Local DNS records</div>
+    <div class="panel">
+      <h2>Manual DNS entries</h2>
+      <p class="desc">Names not tied to a DHCP lease - useful for pointing a name at a service running on cobweb itself, or anything with a fixed IP.</p>
+      <table>
+        <thead><tr><th>Name</th><th>IP</th><th></th></tr></thead>
+        <tbody>
+          {{if not .DNSRecords}}
+            <tr><td colspan="3" class="empty">No manual records yet.</td></tr>
+          {{else}}
+            {{range .DNSRecords}}
+            <tr>
+              <td>{{.Name}}</td>
+              <td>{{.IP}}</td>
+              <td>
+                <form method="post" action="/api/dns/remove" style="margin:0;">
+                  <input type="hidden" name="name" value="{{.Name}}">
+                  <button type="submit" class="danger">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          {{end}}
+        </tbody>
+      </table>
+      <form method="post" action="/api/dns/add" style="margin-top:16px;">
+        <div class="grid3">
+          <div><label>Name</label><input type="text" name="name" placeholder="nas.lan"></div>
+          <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.10"></div>
+          <div></div>
+          <div style="padding-top:22px;"><button type="submit">Add</button></div>
+        </div>
+      </form>
+    </div>
+
+  </main>
+</body>
+</html>
+{{end}}
