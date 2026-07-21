@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"cobweb/internal/config"
+	"cobweb/internal/status"
 )
 
 const (
@@ -49,11 +50,13 @@ func (s *Server) Run() error {
 	addr := &net.UDPAddr{Port: 53, IP: net.IPv4zero}
 	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
+		status.SetDNS(false, err)
 		return fmt.Errorf("dns: listen: %w", err)
 	}
 	s.conn = conn
 	defer conn.Close()
 
+	status.SetDNS(true, nil)
 	log.Printf("dns: listening on :53")
 
 	buf := make([]byte, 512)

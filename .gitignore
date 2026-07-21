@@ -1,3 +1,5 @@
 /cobweb
 *.tmp
 config.json
+credentials.json
+credentials.json.tmp

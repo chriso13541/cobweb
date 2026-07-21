@@ -26,5 +26,17 @@
     <div class="stat-block"><div class="k">Rx</div><div class="v">{{.LANRx}}</div></div>
     <div class="stat-block"><div class="k">Tx</div><div class="v">{{.LANTx}}</div></div>
   </div>
+  <div class="service-row">
+    {{if .DHCPUp}}
+      <span class="badge ok" title="DHCP server running"><span class="dot"></span> DHCP</span>
+    {{else}}
+      <span class="badge danger-badge" title="{{.DHCPErr}}"><span class="dot"></span> DHCP down</span>
+    {{end}}
+    {{if .DNSUp}}
+      <span class="badge ok" title="DNS server running"><span class="dot"></span> DNS</span>
+    {{else}}
+      <span class="badge danger-badge" title="{{.DNSErr}}"><span class="dot"></span> DNS down</span>
+    {{end}}
+  </div>
 </div>
 {{end}}

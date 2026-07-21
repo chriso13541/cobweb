@@ -74,6 +74,10 @@
   tbody tr:last-child td{ border-bottom:none; }
   .empty{ color:var(--text-faint); font-style:italic; padding:14px 4px; font-size:13px; }
 
+  .flash{ font-size:13px; padding:10px 12px; border-radius:var(--radius); margin-bottom:16px; }
+  .flash-error{ background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger); }
+  .flash-ok{ background:var(--accent-dim); border:1px solid var(--accent-dim); color:var(--accent-text); }
+
   /* --- theme toggle switch --- */
   .theme-row{ display:flex; align-items:center; justify-content:space-between; }
   .theme-row .label-text{ font-family:var(--sans); font-size:13.5px; color:var(--text); font-weight:500; }
@@ -100,6 +104,7 @@
       <span class="sub">settings</span>
     </div>
     <a href="/" class="nav-link">← Dashboard</a>
+    <a href="/logout" class="nav-link" style="margin-left:10px;">Logout</a>
   </div>
 
   <main>
@@ -116,6 +121,29 @@
           <span class="switch-track"></span>
         </label>
       </div>
+    </div>
+
+    <div class="section-label">Account</div>
+    <div class="panel">
+      <h2>Change password</h2>
+      <p class="desc">Signing in again isn't required after changing it - your current session stays active.</p>
+      {{if .AccountError}}<div class="flash flash-error">{{.AccountError}}</div>{{end}}
+      {{if .AccountSuccess}}<div class="flash flash-ok">{{.AccountSuccess}}</div>{{end}}
+      <form method="post" action="/api/account/update">
+        <label>Current password</label>
+        <input type="password" name="current_password" autocomplete="current-password">
+        <div class="grid2">
+          <div>
+            <label>New password</label>
+            <input type="password" name="new_password" autocomplete="new-password">
+          </div>
+          <div>
+            <label>Confirm new password</label>
+            <input type="password" name="confirm_password" autocomplete="new-password">
+          </div>
+        </div>
+        <button type="submit">Update password</button>
+      </form>
     </div>
 
     <div class="section-label">Network &amp; DHCP</div>

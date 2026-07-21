@@ -1,0 +1,71 @@
+{{define "login.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cobweb · sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+{{template "theme_script" .}}
+<style>
+  {{template "theme_vars" .}}
+  *{ box-sizing:border-box; }
+  html, body{ height:100%; }
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .card{
+    width:100%; max-width:340px; background:var(--panel); border:1px solid var(--border);
+    border-radius:var(--radius); padding:32px 28px; margin:20px;
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; justify-content:center; margin-bottom:6px; }
+  .brand .mark{ color:var(--accent); font-family:var(--mono); font-size:22px; }
+  .brand h1{ margin:0; font-size:20px; font-weight:600; }
+  .sub{ text-align:center; color:var(--text-faint); font-size:12.5px; font-family:var(--mono); margin-bottom:28px; }
+
+  label{
+    display:block; font-family:var(--mono); font-size:11px; text-transform:uppercase;
+    letter-spacing:0.05em; color:var(--text-faint); margin-bottom:6px;
+  }
+  input[type=text], input[type=password]{
+    width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:10px 12px; border-radius:var(--radius); font-family:var(--mono); font-size:14px;
+    margin-bottom:16px;
+  }
+  input:focus{ outline:none; border-color:var(--accent-dim); }
+
+  button{
+    width:100%; font-family:var(--sans); font-size:14px; font-weight:600; cursor:pointer;
+    background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
+    padding:11px 16px; border-radius:var(--radius); margin-top:4px;
+  }
+  button:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
+
+  .error{
+    background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger);
+    font-size:13px; padding:10px 12px; border-radius:var(--radius); margin-bottom:16px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><span class="mark">◈</span><h1>cobweb</h1></div>
+    <div class="sub">sign in to continue</div>
+
+    {{if .Error}}
+      <div class="error">Incorrect username or password.</div>
+    {{end}}
+
+    <form method="post" action="/login">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" autofocus>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password">
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
+{{end}}

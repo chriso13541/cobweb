@@ -145,9 +145,12 @@
   .badge.warn{ color:var(--warn); border-color:var(--warn-border); }
   .badge.off{ color:var(--text-faint); }
   .badge.reserved{ color:var(--reserved); border-color:var(--reserved-border); }
+  .badge.danger-badge{ color:var(--danger); border-color:var(--danger-border); }
   .dot{ width:6px; height:6px; border-radius:50%; background:currentColor; }
   .dot.pulse{ animation:pulse 2s ease-in-out infinite; }
   @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+  .service-row{ display:flex; gap:8px; margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
 
   .empty-state{
     padding:36px 20px;
@@ -168,8 +171,51 @@
     align-items:center;
     padding:16px 20px;
     border-bottom:1px solid var(--border);
+    gap:16px;
   }
-  .devices-header h2{ margin:0; font-size:14.5px; font-weight:600; }
+  .devices-header h2{ margin:0; font-size:14.5px; font-weight:600; flex-shrink:0; }
+  .search-input{
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:7px 12px; border-radius:var(--radius); font-family:var(--sans); font-size:13px;
+    width:220px; max-width:100%;
+  }
+  .search-input:focus{ outline:none; border-color:var(--accent-dim); }
+  .search-input::placeholder{ color:var(--text-faint); }
+
+  th.sortable{ cursor:pointer; user-select:none; }
+  th.sortable:hover{ color:var(--text-dim); }
+  th.sortable .arrow{ display:inline-block; margin-left:3px; opacity:0.5; }
+  th.sortable.active .arrow{ opacity:1; color:var(--accent); }
+
+  .chevron-cell{ width:32px; text-align:center; }
+  .chevron-btn{
+    background:none; border:none; cursor:pointer; color:var(--text-faint);
+    font-size:12px; padding:4px 8px; border-radius:4px; font-family:var(--mono);
+    transition:transform 0.15s, color 0.15s;
+  }
+  .chevron-btn:hover{ color:var(--accent); }
+  .chevron-btn.open{ transform:rotate(90deg); color:var(--accent); }
+
+  .device-row{ cursor:default; }
+  .details-row td{ padding:0; border-bottom:1px solid var(--border); }
+  .details-box{
+    background:var(--panel-2);
+    padding:16px 20px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:16px;
+  }
+  .details-grid{ display:flex; gap:28px; flex-wrap:wrap; }
+  .details-grid .k{ font-family:var(--mono); font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em; }
+  .details-grid .v{ font-family:var(--mono); font-size:13px; margin-top:3px; color:var(--text); }
+  .btn-small{
+    font-family:var(--sans); font-size:12.5px; font-weight:600; cursor:pointer;
+    background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
+    padding:7px 13px; border-radius:var(--radius); white-space:nowrap;
+  }
+  .btn-small:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
 
   .iface-name{ font-family:var(--mono); font-size:13px; color:var(--text-faint); }
   .iface-role{ font-size:15px; font-weight:600; margin:2px 0 12px; }
@@ -187,6 +233,7 @@
     </div>
     <div style="display:flex; align-items:center; gap:20px; position:relative; z-index:1;">
       <a href="/settings" class="nav-link">Settings</a>
+      <a href="/logout" class="nav-link">Logout</a>
       <div class="clock" id="clock"></div>
     </div>
   </div>
@@ -204,18 +251,21 @@
     <div class="devices-panel">
       <div class="devices-header">
         <h2>Connected devices</h2>
+        <input type="text" id="device-search" class="search-input" placeholder="Search hostname, IP, or MAC…"
+               oninput="onSearchInput()">
       </div>
       <table>
         <thead>
           <tr>
-            <th>Hostname</th>
-            <th>IP address</th>
+            <th class="sortable" data-field="hostname" onclick="setSort('hostname')">Hostname <span class="arrow">▲</span></th>
+            <th class="sortable" data-field="ip" onclick="setSort('ip')">IP address <span class="arrow">▲</span></th>
             <th>MAC address</th>
-            <th>Lease</th>
+            <th class="sortable" data-field="status" onclick="setSort('status')">Status <span class="arrow">▲</span></th>
+            <th class="chevron-cell"></th>
           </tr>
         </thead>
-        <tbody hx-get="/fragments/devices" hx-trigger="load, every 5s" hx-swap="innerHTML">
-          <tr><td colspan="4" class="empty-state">loading…</td></tr>
+        <tbody id="device-rows">
+          <tr><td colspan="5" class="empty-state">loading…</td></tr>
         </tbody>
       </table>
     </div>
@@ -228,6 +278,54 @@
   }
   tick();
   setInterval(tick, 1000);
+
+  // --- device table: search + sort, refreshed via htmx.ajax so both
+  // states survive the periodic auto-refresh rather than resetting
+  // every 5 seconds. ---
+  let sortField = 'hostname';
+  let sortDir = 'asc';
+  let searchTimer = null;
+
+  function refreshDevices(){
+    const q = document.getElementById('device-search').value;
+    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir });
+    htmx.ajax('GET', '/fragments/devices?' + params.toString(), {
+      target: '#device-rows',
+      swap: 'innerHTML'
+    });
+    document.querySelectorAll('th.sortable').forEach(function(th){
+      const isActive = th.dataset.field === sortField;
+      th.classList.toggle('active', isActive);
+      th.querySelector('.arrow').textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
+    });
+  }
+
+  function setSort(field){
+    if (sortField === field) {
+      sortDir = (sortDir === 'asc') ? 'desc' : 'asc';
+    } else {
+      sortField = field;
+      sortDir = 'asc';
+    }
+    refreshDevices();
+  }
+
+  function onSearchInput(){
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refreshDevices, 300);
+  }
+
+  function toggleDetails(rowId){
+    const row = document.getElementById('details-' + rowId);
+    const btn = document.getElementById('chevron-' + rowId);
+    if (!row) return;
+    const isOpen = row.style.display !== 'none';
+    row.style.display = isOpen ? 'none' : 'table-row';
+    if (btn) btn.classList.toggle('open', !isOpen);
+  }
+
+  refreshDevices();
+  setInterval(refreshDevices, 5000);
 </script>
 </body>
 </html>

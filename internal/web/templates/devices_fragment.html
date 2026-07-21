@@ -1,9 +1,11 @@
 {{define "devices_fragment.html"}}
 {{if not .Rows}}
-  <tr><td colspan="4" class="empty-state">No devices seen yet. They'll appear here once they request an address.</td></tr>
+  <tr><td colspan="5" class="empty-state">
+    {{if .Query}}No devices match "{{.Query}}".{{else}}No devices seen yet. They'll appear here once they request an address.{{end}}
+  </td></tr>
 {{else}}
   {{range .Rows}}
-  <tr>
+  <tr class="device-row">
     <td class="hostname">{{.Hostname}}</td>
     <td class="mono">{{.IP}}</td>
     <td class="mono">{{.MAC}}</td>
@@ -15,6 +17,28 @@
       {{else}}
         <span class="badge ok"><span class="dot"></span> {{.TimeLeft}}</span>
       {{end}}
+    </td>
+    <td class="chevron-cell">
+      <button type="button" class="chevron-btn" id="chevron-{{.RowID}}" onclick="toggleDetails('{{.RowID}}')" aria-label="Show details">▸</button>
+    </td>
+  </tr>
+  <tr class="details-row" id="details-{{.RowID}}" style="display:none;">
+    <td colspan="5">
+      <div class="details-box">
+        <div class="details-grid">
+          <div><div class="k">Status</div><div class="v">{{.Status}}</div></div>
+          <div><div class="k">Lease</div><div class="v">{{.ExpiresAbsolute}}</div></div>
+          <div><div class="k">MAC address</div><div class="v">{{.MAC}}</div></div>
+        </div>
+        {{if not .Reserved}}
+        <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+          <input type="hidden" name="hostname" value="{{.Hostname}}">
+          <input type="hidden" name="mac" value="{{.MAC}}">
+          <input type="hidden" name="ip" value="{{.IP}}">
+          <button type="submit" class="btn-small">Pin as static reservation</button>
+        </form>
+        {{end}}
+      </div>
     </td>
   </tr>
   {{end}}

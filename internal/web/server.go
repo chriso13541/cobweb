@@ -2,28 +2,38 @@ package web
 
 import (
 	"embed"
+	"encoding/binary"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"cobweb/internal/auth"
 	"cobweb/internal/config"
 	"cobweb/internal/netstat"
+	"cobweb/internal/status"
 )
+
+const sessionCookieName = "cobweb_session"
 
 // Server holds shared dependencies for HTTP handlers.
 type Server struct {
-	cfg  *config.Config
-	tmpl *template.Template
+	cfg      *config.Config
+	tmpl     *template.Template
+	creds    *auth.Store
+	sessions *auth.SessionManager
+	throttle *auth.LoginThrottle
 }
 
 //go:embed templates/*.html
 var templateFS embed.FS
 
 // New constructs a Server with templates parsed and ready to serve.
-func New(cfg *config.Config) (*Server, error) {
+func New(cfg *config.Config, creds *auth.Store) (*Server, error) {
 	funcs := template.FuncMap{
 		"join": strings.Join,
 	}
@@ -31,23 +41,115 @@ func New(cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, tmpl: tmpl}, nil
+	return &Server{
+		cfg:      cfg,
+		tmpl:     tmpl,
+		creds:    creds,
+		sessions: auth.NewSessionManager(),
+		throttle: auth.NewLoginThrottle(),
+	}, nil
 }
 
-// Routes returns the configured HTTP mux.
+// Routes returns the configured HTTP mux. Every route except /login
+// requires a valid session.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleDashboard)
-	mux.HandleFunc("/settings", s.handleSettingsPage)
-	mux.HandleFunc("/fragments/devices", s.handleDevicesFragment)
-	mux.HandleFunc("/fragments/interfaces", s.handleInterfacesFragment)
-	mux.HandleFunc("/api/reservations/add", s.handleAddReservation)
-	mux.HandleFunc("/api/reservations/remove", s.handleRemoveReservation)
-	mux.HandleFunc("/api/dns/add", s.handleAddDNSRecord)
-	mux.HandleFunc("/api/dns/remove", s.handleRemoveDNSRecord)
-	mux.HandleFunc("/api/network/update", s.handleUpdateNetwork)
+
+	mux.HandleFunc("/login", s.handleLogin)
+	mux.HandleFunc("/logout", s.handleLogout)
+
+	mux.HandleFunc("/", s.requireAuth(s.handleDashboard))
+	mux.HandleFunc("/settings", s.requireAuth(s.handleSettingsPage))
+	mux.HandleFunc("/fragments/devices", s.requireAuth(s.handleDevicesFragment))
+	mux.HandleFunc("/fragments/interfaces", s.requireAuth(s.handleInterfacesFragment))
+	mux.HandleFunc("/api/reservations/add", s.requireAuth(s.handleAddReservation))
+	mux.HandleFunc("/api/reservations/remove", s.requireAuth(s.handleRemoveReservation))
+	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
+	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
+	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
+	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
+	mux.HandleFunc("/api/account/update", s.requireAuth(s.handleAccountUpdate))
+
 	return mux
 }
+
+// --- auth ---
+
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || !s.sessions.Valid(cookie.Value) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// handleLogin serves the login form on GET and processes credentials
+// on POST. Combining both in one handler keeps the route table simple
+// and matches the pattern the rest of this file already uses.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		if cookie, err := r.Cookie(sessionCookieName); err == nil && s.sessions.Valid(cookie.Value) {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		data := struct{ Error bool }{Error: r.URL.Query().Get("error") == "1"}
+		if err := s.tmpl.ExecuteTemplate(w, "login.html", data); err != nil {
+			log.Printf("render login: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	// Throttle before checking credentials, so the delay applies
+	// consistently regardless of whether this attempt succeeds.
+	if d := s.throttle.Delay(); d > 0 {
+		time.Sleep(d)
+	}
+
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+
+	if !s.creds.Verify(username, password) {
+		s.throttle.RecordFailure()
+		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
+		return
+	}
+	s.throttle.RecordSuccess()
+
+	token, err := s.sessions.Create()
+	if err != nil {
+		log.Printf("create session: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(7 * 24 * time.Hour),
+	})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		s.sessions.Revoke(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// --- pages ---
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -60,39 +162,69 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// settingsData wraps a config snapshot with page-local flash state
+// (e.g. an account-settings error) that isn't part of persisted
+// config.
+type settingsData struct {
+	config.Snapshot
+	AccountError   string
+	AccountSuccess string
+}
+
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
-	snap := s.cfg.Snapshot()
-	if err := s.tmpl.ExecuteTemplate(w, "settings.html", snap); err != nil {
+	s.renderSettings(w, r, "", "")
+}
+
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, accountErr, accountOK string) {
+	data := settingsData{
+		Snapshot:       s.cfg.Snapshot(),
+		AccountError:   accountErr,
+		AccountSuccess: accountOK,
+	}
+	if err := s.tmpl.ExecuteTemplate(w, "settings.html", data); err != nil {
 		log.Printf("render settings: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }
 
+// --- fragments ---
+
+// deviceRow is one row of the dashboard's device table, combining
+// static reservations and dynamic leases into a single sortable,
+// searchable list.
+type deviceRow struct {
+	RowID           string
+	Hostname        string
+	IP              string
+	MAC             string
+	Status          string // "reserved", "active", "expired"
+	TimeLeft        string
+	ExpiresAbsolute string
+	Reserved        bool
+}
+
 // handleDevicesFragment returns the device table body, built from
 // current DHCP leases and static reservations - both live in cobweb's
-// own config now, no external lease file to parse.
+// own config now, no external lease file to parse. Supports optional
+// ?q=, ?sort=, ?dir= query params for search and sorting, used by the
+// dashboard's search box and clickable column headers.
 func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 	snap := s.cfg.Snapshot()
 	now := time.Now()
 
-	type row struct {
-		Hostname string
-		IP       string
-		MAC      string
-		Status   string // "reserved", "active", "expired"
-		TimeLeft string
-	}
-
-	var rows []row
+	var rows []deviceRow
 	seen := map[string]bool{}
 
 	for _, res := range snap.Reservations {
-		rows = append(rows, row{
-			Hostname: displayHostname(res.Hostname),
-			IP:       res.IP,
-			MAC:      res.MAC,
-			Status:   "reserved",
-			TimeLeft: "static",
+		rows = append(rows, deviceRow{
+			RowID:           rowID(res.MAC),
+			Hostname:        displayHostname(res.Hostname),
+			IP:              res.IP,
+			MAC:             res.MAC,
+			Status:          "reserved",
+			TimeLeft:        "static",
+			ExpiresAbsolute: "Permanent (static reservation)",
+			Reserved:        true,
 		})
 		seen[res.MAC] = true
 	}
@@ -102,21 +234,65 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			continue // already shown as a reservation above
 		}
 		expires := time.Unix(l.ExpiresAt, 0)
-		status := "active"
-		left := formatTimeLeft(expires, now)
+		st := "active"
 		if expires.Before(now) {
-			status = "expired"
+			st = "expired"
 		}
-		rows = append(rows, row{
-			Hostname: displayHostname(l.Hostname),
-			IP:       l.IP,
-			MAC:      l.MAC,
-			Status:   status,
-			TimeLeft: left,
+		rows = append(rows, deviceRow{
+			RowID:           rowID(l.MAC),
+			Hostname:        displayHostname(l.Hostname),
+			IP:              l.IP,
+			MAC:             l.MAC,
+			Status:          st,
+			TimeLeft:        formatTimeLeft(expires, now),
+			ExpiresAbsolute: expires.Format("Jan 2, 3:04 PM"),
+			Reserved:        false,
 		})
 	}
 
-	data := struct{ Rows []row }{Rows: rows}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if q != "" {
+		filtered := rows[:0:0]
+		for _, row := range rows {
+			hay := strings.ToLower(row.Hostname + " " + row.IP + " " + row.MAC)
+			if strings.Contains(hay, q) {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+
+	sortField := r.URL.Query().Get("sort")
+	if sortField == "" {
+		sortField = "hostname"
+	}
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		dir = "asc"
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		var less bool
+		switch sortField {
+		case "ip":
+			less = ipSortKey(rows[i].IP) < ipSortKey(rows[j].IP)
+		case "status":
+			less = rows[i].Status < rows[j].Status
+		default:
+			less = strings.ToLower(rows[i].Hostname) < strings.ToLower(rows[j].Hostname)
+		}
+		if dir == "desc" {
+			return !less
+		}
+		return less
+	})
+
+	data := struct {
+		Rows  []deviceRow
+		Sort  string
+		Dir   string
+		Query string
+	}{Rows: rows, Sort: sortField, Dir: dir, Query: r.URL.Query().Get("q")}
+
 	if err := s.tmpl.ExecuteTemplate(w, "devices_fragment.html", data); err != nil {
 		log.Printf("render devices fragment: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -135,16 +311,24 @@ func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request
 		log.Printf("stat lan interface %s: %v", snap.LANInterface, err)
 	}
 
+	dhcpState, dnsState := status.Snapshot()
+
 	data := struct {
 		WAN, LAN                   netstat.Interface
 		WANRx, WANTx, LANRx, LANTx string
+		DHCPUp, DNSUp              bool
+		DHCPErr, DNSErr            string
 	}{
-		WAN:   wan,
-		LAN:   lan,
-		WANRx: netstat.HumanBytes(wan.RxBytes),
-		WANTx: netstat.HumanBytes(wan.TxBytes),
-		LANRx: netstat.HumanBytes(lan.RxBytes),
-		LANTx: netstat.HumanBytes(lan.TxBytes),
+		WAN:     wan,
+		LAN:     lan,
+		WANRx:   netstat.HumanBytes(wan.RxBytes),
+		WANTx:   netstat.HumanBytes(wan.TxBytes),
+		LANRx:   netstat.HumanBytes(lan.RxBytes),
+		LANTx:   netstat.HumanBytes(lan.TxBytes),
+		DHCPUp:  dhcpState.Up,
+		DNSUp:   dnsState.Up,
+		DHCPErr: dhcpState.LastErr,
+		DNSErr:  dnsState.LastErr,
 	}
 
 	if err := s.tmpl.ExecuteTemplate(w, "interfaces_fragment.html", data); err != nil {
@@ -154,9 +338,6 @@ func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request
 }
 
 // --- settings mutation handlers ---
-// Each of these is a plain HTML form POST (htmx-friendly: hx-post plus
-// hx-target to swap the settings page back in), so no JS/JSON plumbing
-// is required on the client side.
 
 func (s *Server) handleAddReservation(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -177,7 +358,7 @@ func (s *Server) handleAddReservation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
-	s.handleSettingsPage(w, r)
+	s.renderSettings(w, r, "", "")
 }
 
 func (s *Server) handleRemoveReservation(w http.ResponseWriter, r *http.Request) {
@@ -191,7 +372,34 @@ func (s *Server) handleRemoveReservation(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
-	s.handleSettingsPage(w, r)
+	s.renderSettings(w, r, "", "")
+}
+
+// handleQuickReserve is the dashboard-side "pin as static reservation"
+// action from a device's expanded details row. Unlike
+// handleAddReservation (used by the settings page), it re-renders the
+// device list fragment so it can be used inline without navigating
+// away from the dashboard.
+func (s *Server) handleQuickReserve(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	res := config.Reservation{
+		MAC:      strings.TrimSpace(r.FormValue("mac")),
+		IP:       strings.TrimSpace(r.FormValue("ip")),
+		Hostname: strings.TrimSpace(r.FormValue("hostname")),
+	}
+	if res.MAC == "" || res.IP == "" {
+		http.Error(w, "mac and ip are required", http.StatusBadRequest)
+		return
+	}
+	if err := s.cfg.AddReservation(res); err != nil {
+		log.Printf("quick reserve: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.handleDevicesFragment(w, r)
 }
 
 func (s *Server) handleAddDNSRecord(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +420,7 @@ func (s *Server) handleAddDNSRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
-	s.handleSettingsPage(w, r)
+	s.renderSettings(w, r, "", "")
 }
 
 func (s *Server) handleRemoveDNSRecord(w http.ResponseWriter, r *http.Request) {
@@ -226,7 +434,7 @@ func (s *Server) handleRemoveDNSRecord(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
-	s.handleSettingsPage(w, r)
+	s.renderSettings(w, r, "", "")
 }
 
 func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +468,36 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}
-	s.handleSettingsPage(w, r)
+	s.renderSettings(w, r, "", "")
+}
+
+func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	current := r.FormValue("current_password")
+	newPass := r.FormValue("new_password")
+	confirm := r.FormValue("confirm_password")
+
+	if !s.creds.Verify(s.creds.Username(), current) {
+		s.renderSettings(w, r, "Current password is incorrect.", "")
+		return
+	}
+	if newPass == "" || newPass != confirm {
+		s.renderSettings(w, r, "New passwords do not match.", "")
+		return
+	}
+	if len(newPass) < 8 {
+		s.renderSettings(w, r, "New password must be at least 8 characters.", "")
+		return
+	}
+	if err := s.creds.SetPassword(s.creds.Username(), newPass); err != nil {
+		log.Printf("update password: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.renderSettings(w, r, "", "Password updated.")
 }
 
 // --- small helpers ---
@@ -283,4 +520,21 @@ func formatTimeLeft(expiresAt, now time.Time) string {
 		return strconv.Itoa(h) + "h " + strconv.Itoa(m) + "m"
 	}
 	return strconv.Itoa(m) + "m"
+}
+
+// rowID turns a MAC address into a string safe to use as an HTML
+// element id (colons aren't valid there).
+func rowID(mac string) string {
+	return strings.ReplaceAll(mac, ":", "")
+}
+
+// ipSortKey converts a dotted-quad IPv4 string into a numeric value so
+// devices sort in true numeric order (192.168.2.9 before
+// 192.168.2.10), not lexicographic string order.
+func ipSortKey(ipStr string) uint32 {
+	ip := net.ParseIP(ipStr).To4()
+	if ip == nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(ip)
 }

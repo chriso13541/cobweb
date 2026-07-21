@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cobweb/internal/config"
+	"cobweb/internal/status"
 )
 
 // Server is a running DHCP server bound to one interface's broadcast
@@ -36,6 +37,7 @@ func (s *Server) Run() error {
 	addr := &net.UDPAddr{Port: 67, IP: net.IPv4zero}
 	conn, err := net.ListenUDP("udp4", addr)
 	if err != nil {
+		status.SetDHCP(false, err)
 		return fmt.Errorf("dhcp: listen: %w", err)
 	}
 	s.conn = conn
@@ -68,9 +70,11 @@ func (s *Server) Run() error {
 		return fmt.Errorf("dhcp: control: %w", err)
 	}
 	if sockErr != nil {
+		status.SetDHCP(false, sockErr)
 		return fmt.Errorf("dhcp: socket setup (SO_BROADCAST/SO_BINDTODEVICE on %s): %w", lanIf, sockErr)
 	}
 
+	status.SetDHCP(true, nil)
 	log.Printf("dhcp: listening on :67 (bound to %s)", lanIf)
 
 	buf := make([]byte, 1500)
