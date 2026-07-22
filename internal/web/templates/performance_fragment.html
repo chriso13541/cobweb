@@ -1,0 +1,55 @@
+{{define "performance_fragment.html"}}
+<div class="perf-grid">
+
+  <div class="perf-card">
+    <div class="perf-title">DNS resolver cache</div>
+    {{if eq .DNSMode "recursive"}}
+      {{if gt .TotalLookups 0}}
+        <div class="bar-row">
+          <div class="bar-track">
+            <div class="bar-fill" style="width:{{.HitPct}}%"></div>
+          </div>
+          <div class="bar-label">{{.HitPct}}% hit rate</div>
+        </div>
+        <div class="perf-stats">
+          <div class="stat-block"><div class="k">Cached names</div><div class="v">{{.CacheEntries}}</div></div>
+          <div class="stat-block"><div class="k">Hits</div><div class="v">{{.CacheHits}}</div></div>
+          <div class="stat-block"><div class="k">Misses</div><div class="v">{{.CacheMisses}}</div></div>
+        </div>
+      {{else}}
+        <div class="perf-empty">No lookups yet since last restart.</div>
+      {{end}}
+    {{else}}
+      <div class="perf-empty">Cache only applies in recursive DNS mode. Currently forwarding to upstream - switch modes in Settings to use it.</div>
+    {{end}}
+  </div>
+
+  <div class="perf-card">
+    <div class="perf-title">Active connections (conntrack)</div>
+    {{if .ConntrackAvailable}}
+      <div class="bar-row">
+        <div class="bar-track">
+          <div class="bar-fill" style="width:{{.ConntrackPct}}%"></div>
+        </div>
+        <div class="bar-label">{{.ConntrackPct}}% of ceiling</div>
+      </div>
+      <div class="perf-stats">
+        <div class="stat-block"><div class="k">Current</div><div class="v">{{.ConntrackCount}}</div></div>
+        <div class="stat-block"><div class="k">Ceiling</div><div class="v">{{.ConntrackMax}}</div></div>
+      </div>
+    {{else}}
+      <div class="perf-empty">Conntrack stats unavailable (nf_conntrack module not loaded?).</div>
+    {{end}}
+  </div>
+
+  <div class="perf-card">
+    <div class="perf-title">cobweb process memory</div>
+    <div class="perf-stats">
+      <div class="stat-block"><div class="k">In use</div><div class="v">{{.MemAlloc}}</div></div>
+      <div class="stat-block"><div class="k">Reserved from OS</div><div class="v">{{.MemSys}}</div></div>
+    </div>
+    <div class="perf-note">For reference against your available RAM - cobweb itself is lightweight regardless of machine size.</div>
+  </div>
+
+</div>
+{{end}}

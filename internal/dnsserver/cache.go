@@ -18,6 +18,8 @@ type cacheEntry struct {
 type recursiveCache struct {
 	mu      sync.Mutex
 	entries map[string]cacheEntry
+	hits    int
+	misses  int
 }
 
 func newRecursiveCache() *recursiveCache {
@@ -29,9 +31,19 @@ func (c *recursiveCache) get(key string) ([]net.IP, bool) {
 	defer c.mu.Unlock()
 	e, ok := c.entries[key]
 	if !ok || time.Now().After(e.expiresAt) {
+		c.misses++
 		return nil, false
 	}
+	c.hits++
 	return e.ips, true
+}
+
+// stats returns the current cache size and cumulative hit/miss counts,
+// for the dashboard's performance panel.
+func (c *recursiveCache) stats() (entries, hits, misses int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries), c.hits, c.misses
 }
 
 func (c *recursiveCache) set(key string, ips []net.IP, ttl uint32) {

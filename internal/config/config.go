@@ -36,9 +36,9 @@ type DNSRecord struct {
 // Lease is a dynamically-assigned, non-reserved address handed out from
 // the pool. Persisted so leases survive a cobweb restart.
 type Lease struct {
-	MAC      string `json:"mac"`
-	IP       string `json:"ip"`
-	Hostname string `json:"hostname"`
+	MAC       string `json:"mac"`
+	IP        string `json:"ip"`
+	Hostname  string `json:"hostname"`
 	ExpiresAt int64  `json:"expires_at"` // unix seconds
 }
 

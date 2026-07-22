@@ -144,7 +144,7 @@ func TestReferralChainEndToEnd(t *testing.T) {
 		return buildTestMessage(qname, qtype, nil, authority, glue, 0, 1, 1)
 	})
 
-	answer, err := resolveIterativeFrom([]string{net.JoinHostPort(rootIP, "53")}, "example.com", qTypeA)
+	answer, err := resolveIterativeFrom([]string{net.JoinHostPort(rootIP, "53")}, "example.com", qTypeA, maxResolutionDepth)
 	if err != nil {
 		t.Fatalf("resolveIterativeFrom failed: %v", err)
 	}
@@ -153,6 +153,60 @@ func TestReferralChainEndToEnd(t *testing.T) {
 	}
 	if answer.TTL != 300 {
 		t.Fatalf("got TTL %d, want 300", answer.TTL)
+	}
+}
+
+func TestReferralWithoutGlueRecords(t *testing.T) {
+	// This mirrors the real-world failure: a zone (e.g. anything on
+	// Cloudflare or Azure Traffic Manager) delegates to a nameserver
+	// hosted on a completely different domain, so the parent zone has
+	// no reason to include glue for it. The resolver has to fall back
+	// to resolving that nameserver's hostname on its own.
+	const authIP = "127.0.0.7" // ns.otherprovider.net's real address
+	const rootIP = "127.0.0.5" // stands in for both "root" and "TLD" here
+
+	// authIP answers both roles needed: the actual answer for
+	// mysite.example, and the A record for ns.otherprovider.net when
+	// asked directly (simulating that name's own delegation chain
+	// terminating immediately at this same server for test simplicity).
+	startFakeServer(t, authIP, func(qname string, qtype uint16) []byte {
+		switch qname {
+		case "mysite.example":
+			answer := encodeRR(encodeName("mysite.example"), qTypeA, 120, net.IPv4(203, 0, 113, 9).To4())
+			return buildTestMessage(qname, qtype, answer, nil, nil, 1, 0, 0)
+		case "ns.otherprovider.net":
+			answer := encodeRR(encodeName("ns.otherprovider.net"), qTypeA, 120, net.ParseIP(authIP).To4())
+			return buildTestMessage(qname, qtype, answer, nil, nil, 1, 0, 0)
+		}
+		return nil
+	})
+
+	// "Root": refers mysite.example to ns.otherprovider.net with NO
+	// glue record at all - the exact condition that used to fail.
+	startFakeServer(t, rootIP, func(qname string, qtype uint16) []byte {
+		if qname == "mysite.example" {
+			nsName := encodeName("ns.otherprovider.net")
+			authority := encodeRR(encodeName("example"), typeNS, 300, nsName)
+			return buildTestMessage(qname, qtype, nil, authority, nil, 0, 1, 0)
+		}
+		if qname == "ns.otherprovider.net" {
+			// Root also needs to answer for the NS hostname itself,
+			// referring straight to the authoritative server that
+			// actually knows it (simulating a second delegation hop).
+			nsName := encodeName("ns.otherprovider.net")
+			authority := encodeRR(encodeName("otherprovider.net"), typeNS, 300, nsName)
+			glue := encodeRR(encodeName("ns.otherprovider.net"), qTypeA, 300, net.ParseIP(authIP).To4())
+			return buildTestMessage(qname, qtype, nil, authority, glue, 0, 1, 1)
+		}
+		return nil
+	})
+
+	answer, err := resolveIterativeFrom([]string{net.JoinHostPort(rootIP, "53")}, "mysite.example", qTypeA, maxResolutionDepth)
+	if err != nil {
+		t.Fatalf("resolveIterativeFrom failed on glueless referral: %v", err)
+	}
+	if len(answer.IPs) != 1 || !answer.IPs[0].Equal(net.IPv4(203, 0, 113, 9)) {
+		t.Fatalf("got IPs %v, want [203.0.113.9]", answer.IPs)
 	}
 }
 
@@ -204,4 +258,3 @@ func TestNameDecompressionRoundTrip(t *testing.T) {
 		t.Fatalf("got next=%d, want %d", next2, pointerOffset+2)
 	}
 }
-

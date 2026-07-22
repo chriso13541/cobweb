@@ -102,6 +102,44 @@
   }
   @media (max-width:720px){ .iface-grid{ grid-template-columns:1fr; } }
 
+  .perf-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    gap:16px;
+    margin-bottom:32px;
+  }
+  @media (max-width:900px){ .perf-grid{ grid-template-columns:1fr; } }
+  .perf-card{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:18px 20px;
+  }
+  .perf-title{ font-size:13px; font-weight:600; margin-bottom:14px; }
+  .bar-row{ margin-bottom:14px; }
+  .bar-track{
+    height:8px;
+    background:var(--panel-2);
+    border:1px solid var(--border);
+    border-radius:99px;
+    overflow:hidden;
+  }
+  .bar-fill{
+    height:100%;
+    background:var(--accent);
+    border-radius:99px;
+    transition:width 0.4s ease;
+  }
+  .bar-label{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:var(--text-faint);
+    margin-top:6px;
+  }
+  .perf-stats{ display:flex; gap:20px; flex-wrap:wrap; }
+  .perf-empty{ color:var(--text-faint); font-size:12.5px; line-height:1.5; }
+  .perf-note{ color:var(--text-faint); font-size:11.5px; margin-top:12px; line-height:1.4; }
+
   .panel{
     background:var(--panel);
     border:1px solid var(--border);
@@ -216,6 +254,8 @@
     padding:7px 13px; border-radius:var(--radius); white-space:nowrap;
   }
   .btn-small:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
+  .btn-small-danger{ background:transparent; border-color:var(--danger-border); color:var(--danger); }
+  .btn-small-danger:hover{ background:var(--danger-bg); border-color:var(--danger-border); color:var(--danger); }
 
   .iface-name{ font-family:var(--mono); font-size:13px; color:var(--text-faint); }
   .iface-role{ font-size:15px; font-weight:600; margin:2px 0 12px; }
@@ -246,6 +286,16 @@
          hx-swap="innerHTML">
       <div class="panel"><span class="mono">loading…</span></div>
       <div class="panel"><span class="mono">loading…</span></div>
+    </div>
+
+    <div class="section-label">Performance</div>
+    <div class="perf-grid"
+         hx-get="/fragments/performance"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+      <div class="perf-card"><span class="mono">loading…</span></div>
+      <div class="perf-card"><span class="mono">loading…</span></div>
+      <div class="perf-card"><span class="mono">loading…</span></div>
     </div>
 
     <div class="devices-panel">

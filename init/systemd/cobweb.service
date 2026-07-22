@@ -1,0 +1,27 @@
+[Unit]
+Description=cobweb router control plane (DHCP, DNS, dashboard)
+Documentation=https://github.com/chriso13541/cobweb
+After=network-online.target
+Wants=network-online.target
+
+# Prevents a crash-loop from spamming the journal / hammering the
+# ports if something is persistently wrong (e.g. a bad interface name
+# saved in config.json).
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cobweb --config /etc/cobweb/config.json
+Restart=on-failure
+RestartSec=2
+
+# cobweb binds privileged ports (53, 67) and uses SO_BINDTODEVICE, so
+# it needs root by default - same as it's been run manually throughout
+# development. If you want to run it as a non-root user instead,
+# comment out User=root below and see the "Running without full root"
+# note in the README for the capability-based alternative.
+User=root
+
+[Install]
+WantedBy=multi-user.target

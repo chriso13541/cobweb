@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+name="cobweb"
+description="cobweb router control plane (DHCP, DNS, dashboard)"
+
+: ${cobweb_config:=/etc/cobweb/config.json}
+: ${cobweb_bin:=/usr/local/bin/cobweb}
+
+command="${cobweb_bin}"
+command_args="--config ${cobweb_config}"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/cobweb.log"
+error_log="/var/log/cobweb.log"
+
+# cobweb binds privileged ports (53, 67) and uses SO_BINDTODEVICE, so
+# it needs root - OpenRC services run as root by default, so no
+# command_user override is needed here.
+
+depend() {
+	need net
+	use nftables
+	after nftables
+}

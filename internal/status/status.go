@@ -9,12 +9,12 @@ import "sync"
 
 // State is a snapshot of one service's health.
 type State struct {
-	Up       bool
-	LastErr  string
+	Up      bool
+	LastErr string
 }
 
 var (
-	mu  sync.RWMutex
+	mu   sync.RWMutex
 	dhcp State
 	dns  State
 )

@@ -13,13 +13,13 @@ import (
 // Interface holds a point-in-time snapshot of an interface's state and
 // cumulative counters.
 type Interface struct {
-	Name      string
-	Up        bool
-	Carrier   bool // physical link detected (cable plugged in / associated)
-	Speed     string
-	RxBytes   uint64
-	TxBytes   uint64
-	Addr      string
+	Name    string
+	Up      bool
+	Carrier bool // physical link detected (cable plugged in / associated)
+	Speed   string
+	RxBytes uint64
+	TxBytes uint64
+	Addr    string
 }
 
 const sysNetPath = "/sys/class/net"

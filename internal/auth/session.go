@@ -71,9 +71,9 @@ func (sm *SessionManager) Revoke(token string) {
 // tied to source IP - simple and sufficient for a single-admin local
 // login rather than a public-facing service.
 type LoginThrottle struct {
-	mu           sync.Mutex
-	failCount    int
-	lastFailure  time.Time
+	mu          sync.Mutex
+	failCount   int
+	lastFailure time.Time
 }
 
 // NewLoginThrottle creates a throttle with no recorded failures.

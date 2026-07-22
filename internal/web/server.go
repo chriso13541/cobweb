@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"cobweb/internal/auth"
 	"cobweb/internal/config"
+	"cobweb/internal/dnsserver"
 	"cobweb/internal/netstat"
 	"cobweb/internal/status"
 )
@@ -62,9 +64,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/settings", s.requireAuth(s.handleSettingsPage))
 	mux.HandleFunc("/fragments/devices", s.requireAuth(s.handleDevicesFragment))
 	mux.HandleFunc("/fragments/interfaces", s.requireAuth(s.handleInterfacesFragment))
+	mux.HandleFunc("/fragments/performance", s.requireAuth(s.handlePerformanceFragment))
 	mux.HandleFunc("/api/reservations/add", s.requireAuth(s.handleAddReservation))
 	mux.HandleFunc("/api/reservations/remove", s.requireAuth(s.handleRemoveReservation))
 	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
+	mux.HandleFunc("/api/reservations/quickremove", s.requireAuth(s.handleQuickRemoveReservation))
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
@@ -337,6 +341,63 @@ func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// handlePerformanceFragment answers the "is this actually using RAM
+// well / going as fast as it can" question with the numbers that
+// genuinely reflect that for a single flat home network: the DNS
+// resolver cache's size and hit rate, the kernel's live NAT
+// connection-tracking table (conntrack), and cobweb's own process
+// memory. There's no meaningful "routing table" to visualize here -
+// that concept applies to multi-router networks exchanging routes
+// (BGP/OSPF), not a single gateway with one static default route.
+func (s *Server) handlePerformanceFragment(w http.ResponseWriter, r *http.Request) {
+	cacheEntries, cacheHits, cacheMisses := dnsserver.CacheStats()
+	totalLookups := cacheHits + cacheMisses
+	hitPct := 0
+	if totalLookups > 0 {
+		hitPct = (cacheHits * 100) / totalLookups
+	}
+	ctCount, ctMax, ctErr := netstat.ConntrackStats()
+	if ctErr != nil {
+		log.Printf("read conntrack stats: %v", ctErr)
+	}
+	ctPct := 0
+	if ctMax > 0 {
+		ctPct = (ctCount * 100) / ctMax
+	}
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	snap := s.cfg.Snapshot()
+
+	data := struct {
+		DNSMode                                      string
+		CacheEntries, CacheHits, CacheMisses, HitPct int
+		TotalLookups                                 int
+		ConntrackCount, ConntrackMax, ConntrackPct   int
+		ConntrackAvailable                           bool
+		MemAlloc, MemSys                             string
+	}{
+		DNSMode:            snap.DNSMode,
+		CacheEntries:       cacheEntries,
+		CacheHits:          cacheHits,
+		CacheMisses:        cacheMisses,
+		HitPct:             hitPct,
+		TotalLookups:       totalLookups,
+		ConntrackCount:     ctCount,
+		ConntrackMax:       ctMax,
+		ConntrackPct:       ctPct,
+		ConntrackAvailable: ctErr == nil,
+		MemAlloc:           netstat.HumanBytes(mem.Alloc),
+		MemSys:             netstat.HumanBytes(mem.Sys),
+	}
+
+	if err := s.tmpl.ExecuteTemplate(w, "performance_fragment.html", data); err != nil {
+		log.Printf("render performance fragment: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
 // --- settings mutation handlers ---
 
 func (s *Server) handleAddReservation(w http.ResponseWriter, r *http.Request) {
@@ -396,6 +457,25 @@ func (s *Server) handleQuickReserve(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.cfg.AddReservation(res); err != nil {
 		log.Printf("quick reserve: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.handleDevicesFragment(w, r)
+}
+
+// handleQuickRemoveReservation is the dashboard-side "remove
+// reservation" action from a device's expanded details row. Mirrors
+// handleQuickReserve: unlike handleRemoveReservation (used by the
+// settings page), it re-renders the device list fragment in place
+// rather than the full settings page.
+func (s *Server) handleQuickRemoveReservation(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	mac := strings.TrimSpace(r.FormValue("mac"))
+	if err := s.cfg.RemoveReservation(mac); err != nil {
+		log.Printf("quick remove reservation: %v", err)
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}

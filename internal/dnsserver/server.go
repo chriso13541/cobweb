@@ -41,7 +41,25 @@ type Server struct {
 // New creates a DNS server. It does not start listening until Run is
 // called.
 func New(cfg *config.Config) *Server {
-	return &Server{cfg: cfg, cache: newRecursiveCache()}
+	cache := newRecursiveCache()
+	activeCache = cache
+	return &Server{cfg: cfg, cache: cache}
+}
+
+// activeCache points at the currently running server's cache. There's
+// only ever one dnsserver.Server per process in practice, so this is a
+// simple way for the web dashboard to read cache effectiveness without
+// needing a direct reference to the Server itself.
+var activeCache *recursiveCache
+
+// CacheStats returns the current DNS cache size and cumulative
+// hit/miss counts, for the dashboard's performance panel. Safe to call
+// even if recursive mode has never been used (returns all zeros).
+func CacheStats() (entries, hits, misses int) {
+	if activeCache == nil {
+		return 0, 0, 0
+	}
+	return activeCache.stats()
 }
 
 // Run binds to UDP :53 and serves requests until the process exits.
@@ -195,10 +213,10 @@ func (s *Server) forward(msg []byte) ([]byte, error) {
 // Real DNS messages can carry multiple questions; in practice every
 // resolver sends exactly one, so we only need to handle that case.
 type question struct {
-	name       string
-	qtype      uint16
-	qclass     uint16
-	nameEnd    int // byte offset immediately after the question section
+	name    string
+	qtype   uint16
+	qclass  uint16
+	nameEnd int // byte offset immediately after the question section
 }
 
 func parseQuestion(msg []byte) (*question, error) {

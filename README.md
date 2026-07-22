@@ -60,27 +60,62 @@ interfaces, the DHCP pool, reservations, and DNS.
 
 ## Running as a service
 
-```ini
-# /etc/systemd/system/cobweb.service
-[Unit]
-Description=cobweb router control plane
-After=network-online.target
-Wants=network-online.target
+Unit/init files for both are in `init/` and are meant to be installed
+as-is, not copy-pasted by hand.
 
-[Service]
-ExecStart=/usr/local/bin/cobweb --config /etc/cobweb/config.json
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-```
+### systemd
 
 ```bash
 sudo cp cobweb /usr/local/bin/
+sudo mkdir -p /etc/cobweb
+sudo cp init/systemd/cobweb.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now cobweb
 ```
+
+Check it with `systemctl status cobweb` and `journalctl -u cobweb -f`.
+
+### OpenRC
+
+```bash
+sudo cp cobweb /usr/local/bin/
+sudo mkdir -p /etc/cobweb
+sudo cp init/openrc/cobweb.openrc /etc/init.d/cobweb
+sudo chmod +x /etc/init.d/cobweb
+sudo rc-update add cobweb default
+sudo rc-service cobweb start
+```
+
+Logs go to `/var/log/cobweb.log`; check status with `rc-service cobweb status`.
+
+### Both
+
+Either way, on first launch cobweb writes its default `config.json`
+and `credentials.json` (default login `admin`/`admin` - change it
+immediately from Settings → Account) to `/etc/cobweb/`, and keeps
+running under whichever init system restarts it if it ever exits.
+
+### Running without full root
+
+Both unit files run cobweb as root by default, since it binds
+privileged ports (53, 67) and uses `SO_BINDTODEVICE` (which needs
+`CAP_NET_RAW`). If you'd rather not run it as full root, the systemd
+unit can be adjusted to run as a dedicated user with just the specific
+capabilities it needs:
+
+```ini
+User=cobweb
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+```
+
+This needs a `cobweb` system user created ahead of time, and
+`/etc/cobweb` owned by that user (`chown -R cobweb:cobweb /etc/cobweb`)
+so it can still write its config and credential files. Not set up by
+default because it's an extra failure mode to debug (permission
+errors on the config directory) for a single-purpose home gateway box
+where root is already the trust boundary - worth doing if you want the
+extra hardening, not required.
 
 ## Config file
 
@@ -118,12 +153,16 @@ restarted.
 ## Project layout
 
 ```
-cmd/cobweb/          entry point - loads config, starts all three servers
+cmd/cobweb/          entry point - loads config, starts all servers with crash-resilient retry
+internal/auth/        login: PBKDF2 password hashing, sessions, brute-force throttling
 internal/config/      shared JSON-backed config, thread-safe
 internal/dhcp/        DHCPv4 packet parsing + server state machine
-internal/dnsserver/   DNS local-record resolution + upstream forwarding
+internal/dnsserver/   local records, forward mode, and the recursive resolver (root/TLD/authoritative)
 internal/netstat/     interface link state / traffic counters via /sys
+internal/status/      DHCP/DNS live health, surfaced on the dashboard
 internal/web/         dashboard HTTP handlers + htmx templates
+init/systemd/         systemd unit file
+init/openrc/          OpenRC init script
 ```
 
 ## License

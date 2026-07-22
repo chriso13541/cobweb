@@ -13,8 +13,9 @@ const (
 	typeNS    = 2
 	typeCNAME = 5
 
-	maxReferralHops = 20
-	queryTimeout    = 3 * time.Second
+	maxReferralHops    = 20
+	maxResolutionDepth = 10 // caps total work including nested NS-hostname lookups
+	queryTimeout       = 3 * time.Second
 )
 
 // rr is one parsed resource record from a DNS message. RDataOffset is
@@ -278,13 +279,20 @@ func resolveIterative(qname string, qtype uint16) (*resolvedAnswer, error) {
 	for i, ip := range rootServers {
 		addrs[i] = net.JoinHostPort(ip, "53")
 	}
-	return resolveIterativeFrom(addrs, qname, qtype)
+	return resolveIterativeFrom(addrs, qname, qtype, maxResolutionDepth)
 }
 
 // resolveIterativeFrom is the actual implementation, parameterized on
 // the starting server list so tests can exercise the full referral
 // walk against local fake servers rather than the real DNS root.
-func resolveIterativeFrom(startServers []string, qname string, qtype uint16) (*resolvedAnswer, error) {
+// depth bounds total work across both the main referral loop and any
+// nested NS-hostname resolutions it triggers (see below), so a
+// pathological or malicious chain of referrals can't cause unbounded
+// recursion.
+func resolveIterativeFrom(startServers []string, qname string, qtype uint16, depth int) (*resolvedAnswer, error) {
+	if depth <= 0 {
+		return nil, fmt.Errorf("dns: resolution depth exceeded for %s", qname)
+	}
 	currentName := strings.ToLower(strings.TrimSuffix(qname, ".")) + "."
 	servers := append([]string{}, startServers...)
 
@@ -356,8 +364,29 @@ func resolveIterativeFrom(startServers []string, qname string, qtype uint16) (*r
 				nextServers = append(nextServers, net.JoinHostPort(net.IP(a.RData).String(), "53"))
 			}
 		}
+
 		if len(nextServers) == 0 {
-			return nil, fmt.Errorf("dns: referral without glue records for %s", currentName)
+			// No glue - this is the common case for nameservers hosted
+			// on a different domain than the one being resolved (e.g.
+			// almost anything on Cloudflare, or Azure's
+			// trafficmanager.net). There's no circular dependency
+			// here, so just resolve one of the referred nameserver
+			// hostnames as its own independent lookup, starting fresh
+			// from the same root, and use whatever IP that returns.
+			for nsName := range nsNames {
+				sub, err := resolveIterativeFrom(startServers, nsName, qTypeA, depth-1)
+				if err != nil || len(sub.IPs) == 0 {
+					continue
+				}
+				for _, ip := range sub.IPs {
+					nextServers = append(nextServers, net.JoinHostPort(ip.String(), "53"))
+				}
+				break // one resolved nameserver is enough to continue
+			}
+		}
+
+		if len(nextServers) == 0 {
+			return nil, fmt.Errorf("dns: referral without glue and NS resolution failed for %s", currentName)
 		}
 		servers = nextServers
 	}
