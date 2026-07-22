@@ -347,7 +347,7 @@
     htmx.ajax('GET', '/fragments/devices?' + params.toString(), {
       target: '#device-rows',
       swap: 'innerHTML'
-    });
+    }).then(reapplyOpenRows);
     document.querySelectorAll('th.sortable').forEach(function(th){
       const isActive = th.dataset.field === sortField;
       th.classList.toggle('active', isActive);
