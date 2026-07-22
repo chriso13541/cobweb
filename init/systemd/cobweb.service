@@ -1,8 +1,16 @@
 [Unit]
 Description=cobweb router control plane (DHCP, DNS, dashboard)
 Documentation=https://github.com/chriso13541/cobweb
-After=network-online.target
-Wants=network-online.target
+
+# Deliberately NOT network-online.target: that pulls in
+# NetworkManager-wait-online / systemd-networkd-wait-online, which can
+# hang or time out slowly on multi-interface boxes (e.g. a WiFi WAN
+# client link alongside a wired LAN link) - exactly this box's setup.
+# cobweb doesn't need that guarantee anyway: its DHCP/DNS servers
+# already retry with backoff if an interface isn't ready yet (see
+# runForever in main.go), so a weaker, fast-to-satisfy dependency is
+# both sufficient and avoids the hang entirely.
+After=network.target
 
 # Prevents a crash-loop from spamming the journal / hammering the
 # ports if something is persistently wrong (e.g. a bad interface name

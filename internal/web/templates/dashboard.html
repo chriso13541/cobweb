@@ -245,15 +245,16 @@
     flex-wrap:wrap;
     gap:16px;
   }
+  .details-actions{ display:flex; gap:10px; flex-wrap:wrap; }
   .details-grid{ display:flex; gap:28px; flex-wrap:wrap; }
   .details-grid .k{ font-family:var(--mono); font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em; }
   .details-grid .v{ font-family:var(--mono); font-size:13px; margin-top:3px; color:var(--text); }
   .btn-small{
     font-family:var(--sans); font-size:12.5px; font-weight:600; cursor:pointer;
-    background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
+    background:var(--accent); color:var(--accent-hover-text); border:1px solid var(--accent);
     padding:7px 13px; border-radius:var(--radius); white-space:nowrap;
   }
-  .btn-small:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
+  .btn-small:hover{ filter:brightness(1.08); }
   .btn-small-danger{ background:transparent; border-color:var(--danger-border); color:var(--danger); }
   .btn-small-danger:hover{ background:var(--danger-bg); border-color:var(--danger-border); color:var(--danger); }
 
@@ -288,16 +289,6 @@
       <div class="panel"><span class="mono">loading…</span></div>
     </div>
 
-    <div class="section-label">Performance</div>
-    <div class="perf-grid"
-         hx-get="/fragments/performance"
-         hx-trigger="load, every 5s"
-         hx-swap="innerHTML">
-      <div class="perf-card"><span class="mono">loading…</span></div>
-      <div class="perf-card"><span class="mono">loading…</span></div>
-      <div class="perf-card"><span class="mono">loading…</span></div>
-    </div>
-
     <div class="devices-panel">
       <div class="devices-header">
         <h2>Connected devices</h2>
@@ -319,6 +310,16 @@
         </tbody>
       </table>
     </div>
+
+    <div class="section-label">Performance</div>
+    <div class="perf-grid"
+         hx-get="/fragments/performance"
+         hx-trigger="load, every 5s"
+         hx-swap="innerHTML">
+      <div class="perf-card"><span class="mono">loading…</span></div>
+      <div class="perf-card"><span class="mono">loading…</span></div>
+      <div class="perf-card"><span class="mono">loading…</span></div>
+    </div>
   </main>
 
 <script>
@@ -331,10 +332,14 @@
 
   // --- device table: search + sort, refreshed via htmx.ajax so both
   // states survive the periodic auto-refresh rather than resetting
-  // every 5 seconds. ---
+  // every 5 seconds. Which rows are expanded is tracked separately
+  // (openRows) and re-applied after every refresh, since each refresh
+  // replaces the table body's HTML wholesale - without this, an open
+  // details row would silently collapse on the next 5s poll. ---
   let sortField = 'hostname';
   let sortDir = 'asc';
   let searchTimer = null;
+  let openRows = new Set();
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
@@ -349,6 +354,25 @@
       th.querySelector('.arrow').textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
     });
   }
+
+  function reapplyOpenRows(){
+    openRows.forEach(function(rowId){
+      const row = document.getElementById('details-' + rowId);
+      const btn = document.getElementById('chevron-' + rowId);
+      if (row) row.style.display = 'table-row';
+      if (btn) btn.classList.add('open');
+    });
+  }
+
+  // Covers every swap into the device table body - the 5s periodic
+  // refresh, sort/search-triggered refreshes, AND the Pin/Remove
+  // action buttons - so an expanded row never silently collapses
+  // regardless of what caused the table to re-render.
+  document.body.addEventListener('htmx:afterSwap', function(evt){
+    if (evt.detail && evt.detail.target && evt.detail.target.id === 'device-rows') {
+      reapplyOpenRows();
+    }
+  });
 
   function setSort(field){
     if (sortField === field) {
@@ -372,6 +396,11 @@
     const isOpen = row.style.display !== 'none';
     row.style.display = isOpen ? 'none' : 'table-row';
     if (btn) btn.classList.toggle('open', !isOpen);
+    if (isOpen) {
+      openRows.delete(rowId);
+    } else {
+      openRows.add(rowId);
+    }
   }
 
   refreshDevices();

@@ -69,6 +69,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/reservations/remove", s.requireAuth(s.handleRemoveReservation))
 	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
 	mux.HandleFunc("/api/reservations/quickremove", s.requireAuth(s.handleQuickRemoveReservation))
+	mux.HandleFunc("/api/leases/quickremove", s.requireAuth(s.handleQuickRemoveLease))
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
@@ -476,6 +477,24 @@ func (s *Server) handleQuickRemoveReservation(w http.ResponseWriter, r *http.Req
 	mac := strings.TrimSpace(r.FormValue("mac"))
 	if err := s.cfg.RemoveReservation(mac); err != nil {
 		log.Printf("quick remove reservation: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.handleDevicesFragment(w, r)
+}
+
+// handleQuickRemoveLease clears a dynamic (non-reserved) device entry
+// from the dashboard. If the device is still actually connected, it
+// will simply reappear on its next DHCP renewal - this just clears
+// stale/known entries from view, it isn't a block.
+func (s *Server) handleQuickRemoveLease(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	mac := strings.TrimSpace(r.FormValue("mac"))
+	if err := s.cfg.RemoveLease(mac); err != nil {
+		log.Printf("quick remove lease: %v", err)
 		http.Error(w, "failed to save", http.StatusInternalServerError)
 		return
 	}

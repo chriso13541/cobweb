@@ -31,12 +31,18 @@
           <div><div class="k">MAC address</div><div class="v">{{.MAC}}</div></div>
         </div>
         {{if not .Reserved}}
-        <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
-          <input type="hidden" name="hostname" value="{{.Hostname}}">
-          <input type="hidden" name="mac" value="{{.MAC}}">
-          <input type="hidden" name="ip" value="{{.IP}}">
-          <button type="submit" class="btn-small">Pin as static reservation</button>
-        </form>
+        <div class="details-actions">
+          <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+            <input type="hidden" name="hostname" value="{{.Hostname}}">
+            <input type="hidden" name="mac" value="{{.MAC}}">
+            <input type="hidden" name="ip" value="{{.IP}}">
+            <button type="submit" class="btn-small">Pin as static reservation</button>
+          </form>
+          <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+            <input type="hidden" name="mac" value="{{.MAC}}">
+            <button type="submit" class="btn-small btn-small-danger">Remove entry</button>
+          </form>
+        </div>
         {{else}}
         <form hx-post="/api/reservations/quickremove" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
           <input type="hidden" name="mac" value="{{.MAC}}">

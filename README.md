@@ -75,6 +75,16 @@ sudo systemctl enable --now cobweb
 
 Check it with `systemctl status cobweb` and `journalctl -u cobweb -f`.
 
+If `systemctl start`/`enable --now` seems to hang: it's ordered after
+`network.target` (basically instant), not `network-online.target`,
+specifically because the latter pulls in a wait-online helper that can
+hang or time out slowly on multi-interface boxes (e.g. a WiFi WAN
+client alongside a wired LAN link, as on this project's own reference
+setup). If you're still seeing a hang, it's not cobweb's unit file -
+check `systemctl status network-online.target` and
+`journalctl -u NetworkManager-wait-online.service` (or
+`systemd-networkd-wait-online.service`) for the real cause.
+
 ### OpenRC
 
 ```bash

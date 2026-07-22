@@ -281,6 +281,25 @@ func (c *Config) LeaseForMAC(mac string) (Lease, bool) {
 	return Lease{}, false
 }
 
+// RemoveLease deletes a dynamic lease entry by MAC. Note this only
+// clears it from cobweb's records - if the device is still actually
+// on the network, it'll simply get a fresh lease (possibly the same
+// IP) the next time it renews. This is for clearing stale/known
+// entries from view, not for blocking a device - that's a separate,
+// not-yet-built feature.
+func (c *Config) RemoveLease(mac string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.Leases[:0]
+	for _, l := range c.Leases {
+		if l.MAC != mac {
+			out = append(out, l)
+		}
+	}
+	c.Leases = out
+	return c.saveLocked()
+}
+
 // IPInUse reports whether ip is currently held by any active lease or
 // reservation other than excludeMAC. Used by the pool allocator to avoid
 // double-assigning an address.

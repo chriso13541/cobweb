@@ -67,10 +67,10 @@
 
   button, .btn{
     font-family:var(--sans); font-size:13.5px; font-weight:600; cursor:pointer;
-    background:var(--accent-dim); color:var(--accent-text); border:1px solid var(--accent-dim);
+    background:var(--accent); color:var(--accent-hover-text); border:1px solid var(--accent);
     padding:9px 16px; border-radius:var(--radius);
   }
-  button:hover{ background:var(--accent); border-color:var(--accent); color:var(--accent-hover-text); }
+  button:hover{ filter:brightness(1.08); }
   button.danger{ background:transparent; border-color:var(--danger-border); color:var(--danger); padding:6px 10px; font-size:12px; }
   button.danger:hover{ background:var(--danger-bg); }
 
@@ -86,7 +86,7 @@
 
   .flash{ font-size:13px; padding:10px 12px; border-radius:var(--radius); margin-bottom:16px; }
   .flash-error{ background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger); }
-  .flash-ok{ background:var(--accent-dim); border:1px solid var(--accent-dim); color:var(--accent-text); }
+  .flash-ok{ background:var(--accent); border:1px solid var(--accent); color:var(--accent-hover-text); }
 
   /* --- theme toggle switch --- */
   .theme-row{ display:flex; align-items:center; justify-content:space-between; }
