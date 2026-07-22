@@ -333,22 +333,35 @@
   // --- device table: search + sort + which rows are expanded, all
   // sent to the server on every refresh so it can render the correct
   // state directly - no client-side "fix it after the swap" step,
-  // which is what caused the flicker: there's no longer a moment
-  // where a row renders collapsed and then gets corrected a beat
-  // later, since the server never sends collapsed HTML for an
-  // open row in the first place. ---
+  // which is what caused the earlier flicker: there's no longer a
+  // moment where a row renders collapsed and then gets corrected a
+  // beat later, since the server never sends collapsed HTML for an
+  // open row in the first place.
+  //
+  // On top of that: refreshDevices only actually touches the DOM when
+  // the fetched HTML differs from what's already shown. In practice
+  // that's most polls - the lease countdown text only changes once a
+  // minute, not every 5 seconds - so skipping a no-op swap avoids
+  // whatever's causing a visible flicker on unrelated re-renders,
+  // regardless of the exact cause. ---
   let sortField = 'hostname';
   let sortDir = 'asc';
   let searchTimer = null;
   let openRows = new Set();
+  let lastDevicesHTML = null;
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
     const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, open: Array.from(openRows).join(',') });
-    htmx.ajax('GET', '/fragments/devices?' + params.toString(), {
-      target: '#device-rows',
-      swap: 'innerHTML'
-    });
+    fetch('/fragments/devices?' + params.toString())
+      .then(function(resp){ return resp.text(); })
+      .then(function(html){
+        if (html === lastDevicesHTML) return; // nothing actually changed - don't touch the DOM at all
+        lastDevicesHTML = html;
+        const container = document.getElementById('device-rows');
+        container.innerHTML = html;
+        htmx.process(container); // re-scan the new content so the Pin/Remove buttons' hx- attributes still work
+      });
     document.querySelectorAll('th.sortable').forEach(function(th){
       const isActive = th.dataset.field === sortField;
       th.classList.toggle('active', isActive);
