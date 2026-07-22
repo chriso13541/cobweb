@@ -330,12 +330,13 @@
   tick();
   setInterval(tick, 1000);
 
-  // --- device table: search + sort, refreshed via htmx.ajax so both
-  // states survive the periodic auto-refresh rather than resetting
-  // every 5 seconds. Which rows are expanded is tracked separately
-  // (openRows) and re-applied after every refresh, since each refresh
-  // replaces the table body's HTML wholesale - without this, an open
-  // details row would silently collapse on the next 5s poll. ---
+  // --- device table: search + sort + which rows are expanded, all
+  // sent to the server on every refresh so it can render the correct
+  // state directly - no client-side "fix it after the swap" step,
+  // which is what caused the flicker: there's no longer a moment
+  // where a row renders collapsed and then gets corrected a beat
+  // later, since the server never sends collapsed HTML for an
+  // open row in the first place. ---
   let sortField = 'hostname';
   let sortDir = 'asc';
   let searchTimer = null;
@@ -343,36 +344,17 @@
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
-    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir });
+    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, open: Array.from(openRows).join(',') });
     htmx.ajax('GET', '/fragments/devices?' + params.toString(), {
       target: '#device-rows',
       swap: 'innerHTML'
-    }).then(reapplyOpenRows);
+    });
     document.querySelectorAll('th.sortable').forEach(function(th){
       const isActive = th.dataset.field === sortField;
       th.classList.toggle('active', isActive);
       th.querySelector('.arrow').textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
     });
   }
-
-  function reapplyOpenRows(){
-    openRows.forEach(function(rowId){
-      const row = document.getElementById('details-' + rowId);
-      const btn = document.getElementById('chevron-' + rowId);
-      if (row) row.style.display = 'table-row';
-      if (btn) btn.classList.add('open');
-    });
-  }
-
-  // Covers every swap into the device table body - the 5s periodic
-  // refresh, sort/search-triggered refreshes, AND the Pin/Remove
-  // action buttons - so an expanded row never silently collapses
-  // regardless of what caused the table to re-render.
-  document.body.addEventListener('htmx:afterSwap', function(evt){
-    if (evt.detail && evt.detail.target && evt.detail.target.id === 'device-rows') {
-      reapplyOpenRows();
-    }
-  });
 
   function setSort(field){
     if (sortField === field) {
@@ -389,6 +371,10 @@
     searchTimer = setTimeout(refreshDevices, 300);
   }
 
+  // Toggles instantly on click (no round trip needed just to
+  // open/close), and keeps openRows in sync so the next refresh -
+  // triggered by the 5s timer, sort, or search - tells the server to
+  // keep rendering this row expanded.
   function toggleDetails(rowId){
     const row = document.getElementById('details-' + rowId);
     const btn = document.getElementById('chevron-' + rowId);

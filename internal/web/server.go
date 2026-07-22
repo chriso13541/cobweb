@@ -206,23 +206,36 @@ type deviceRow struct {
 	TimeLeft        string
 	ExpiresAbsolute string
 	Reserved        bool
+	Open            bool // whether this row's details are expanded
 }
 
 // handleDevicesFragment returns the device table body, built from
 // current DHCP leases and static reservations - both live in cobweb's
 // own config now, no external lease file to parse. Supports optional
-// ?q=, ?sort=, ?dir= query params for search and sorting, used by the
-// dashboard's search box and clickable column headers.
+// ?q=, ?sort=, ?dir= query params for search and sorting, and an
+// "open" param (comma-separated row IDs) so the dashboard's periodic
+// refresh can tell the server which rows should render already
+// expanded. Baking that into the initial HTML - rather than rendering
+// collapsed and then correcting it client-side after the fact - is
+// what avoids a visible flicker every refresh cycle.
 func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 	snap := s.cfg.Snapshot()
 	now := time.Now()
+
+	openIDs := map[string]bool{}
+	for _, id := range strings.Split(r.FormValue("open"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			openIDs[id] = true
+		}
+	}
 
 	var rows []deviceRow
 	seen := map[string]bool{}
 
 	for _, res := range snap.Reservations {
+		id := rowID(res.MAC)
 		rows = append(rows, deviceRow{
-			RowID:           rowID(res.MAC),
+			RowID:           id,
 			Hostname:        displayHostname(res.Hostname),
 			IP:              res.IP,
 			MAC:             res.MAC,
@@ -230,6 +243,7 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			TimeLeft:        "static",
 			ExpiresAbsolute: "Permanent (static reservation)",
 			Reserved:        true,
+			Open:            openIDs[id],
 		})
 		seen[res.MAC] = true
 	}
@@ -243,8 +257,9 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 		if expires.Before(now) {
 			st = "expired"
 		}
+		id := rowID(l.MAC)
 		rows = append(rows, deviceRow{
-			RowID:           rowID(l.MAC),
+			RowID:           id,
 			Hostname:        displayHostname(l.Hostname),
 			IP:              l.IP,
 			MAC:             l.MAC,
@@ -252,6 +267,7 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			TimeLeft:        formatTimeLeft(expires, now),
 			ExpiresAbsolute: expires.Format("Jan 2, 3:04 PM"),
 			Reserved:        false,
+			Open:            openIDs[id],
 		})
 	}
 

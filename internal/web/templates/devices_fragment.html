@@ -19,10 +19,10 @@
       {{end}}
     </td>
     <td class="chevron-cell">
-      <button type="button" class="chevron-btn" id="chevron-{{.RowID}}" onclick="toggleDetails('{{.RowID}}')" aria-label="Show details">▸</button>
+      <button type="button" class="chevron-btn{{if .Open}} open{{end}}" id="chevron-{{.RowID}}" onclick="toggleDetails('{{.RowID}}')" aria-label="Show details">▸</button>
     </td>
   </tr>
-  <tr class="details-row" id="details-{{.RowID}}" style="display:none;">
+  <tr class="details-row" id="details-{{.RowID}}" style="display:{{if .Open}}table-row{{else}}none{{end}};">
     <td colspan="5">
       <div class="details-box">
         <div class="details-grid">
@@ -32,19 +32,22 @@
         </div>
         {{if not .Reserved}}
         <div class="details-actions">
-          <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+          <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML"
+                hx-vals='js:{open: Array.from(openRows).join(",")}' style="margin:0;">
             <input type="hidden" name="hostname" value="{{.Hostname}}">
             <input type="hidden" name="mac" value="{{.MAC}}">
             <input type="hidden" name="ip" value="{{.IP}}">
             <button type="submit" class="btn-small">Pin as static reservation</button>
           </form>
-          <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+          <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
+                hx-vals='js:{open: Array.from(openRows).join(",")}' style="margin:0;">
             <input type="hidden" name="mac" value="{{.MAC}}">
             <button type="submit" class="btn-small btn-small-danger">Remove entry</button>
           </form>
         </div>
         {{else}}
-        <form hx-post="/api/reservations/quickremove" hx-target="#device-rows" hx-swap="innerHTML" style="margin:0;">
+        <form hx-post="/api/reservations/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
+              hx-vals='js:{open: Array.from(openRows).join(",")}' style="margin:0;">
           <input type="hidden" name="mac" value="{{.MAC}}">
           <button type="submit" class="btn-small btn-small-danger">Remove reservation</button>
         </form>
