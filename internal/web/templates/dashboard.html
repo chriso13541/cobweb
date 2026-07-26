@@ -338,30 +338,59 @@
   // beat later, since the server never sends collapsed HTML for an
   // open row in the first place.
   //
-  // On top of that: refreshDevices only actually touches the DOM when
-  // the fetched HTML differs from what's already shown. In practice
-  // that's most polls - the lease countdown text only changes once a
-  // minute, not every 5 seconds - so skipping a no-op swap avoids
-  // whatever's causing a visible flicker on unrelated re-renders,
-  // regardless of the exact cause. ---
+  // On top of that, two more layers guard against races:
+  //  1. Diff-before-swap: only touch the DOM when the fetched HTML
+  //     actually differs from what's shown, since the lease countdown
+  //     text only changes once a minute, not every 5s poll.
+  //  2. Request sequencing + abort: every fetch gets a sequence
+  //     number. Clicking a chevron (or submitting Pin/Remove) bumps
+  //     the sequence and cancels whatever fetch is currently in
+  //     flight, and a response is only ever applied if it's still the
+  //     latest one issued. Without this, a poll that started *before*
+  //     a click - carrying the pre-click openRows snapshot - could
+  //     land *after* the click and silently overwrite it, since its
+  //     HTML would legitimately differ from what's now on screen.
+  //     That's what caused a row to visibly reopen and then instantly
+  //     flash closed again. ---
   let sortField = 'hostname';
   let sortDir = 'asc';
   let searchTimer = null;
   let openRows = new Set();
   let lastDevicesHTML = null;
+  let requestSeq = 0;
+  let currentAbort = null;
+
+  // Cancels any in-flight devices fetch and bumps the sequence
+  // counter, so that fetch's response - carrying a now-outdated
+  // snapshot of openRows - can never be applied even if it still
+  // completes before being aborted.
+  function invalidatePendingDevicesFetch(){
+    requestSeq++;
+    if (currentAbort) currentAbort.abort();
+  }
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
     const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, open: Array.from(openRows).join(',') });
-    fetch('/fragments/devices?' + params.toString())
+
+    invalidatePendingDevicesFetch();
+    const seq = requestSeq;
+    currentAbort = new AbortController();
+
+    fetch('/fragments/devices?' + params.toString(), { signal: currentAbort.signal })
       .then(function(resp){ return resp.text(); })
       .then(function(html){
+        if (seq !== requestSeq) return; // superseded by a newer poll, sort, search, or click - discard
         if (html === lastDevicesHTML) return; // nothing actually changed - don't touch the DOM at all
         lastDevicesHTML = html;
         const container = document.getElementById('device-rows');
         container.innerHTML = html;
         htmx.process(container); // re-scan the new content so the Pin/Remove buttons' hx- attributes still work
+      })
+      .catch(function(err){
+        if (err.name !== 'AbortError') console.error('refreshDevices failed:', err);
       });
+
     document.querySelectorAll('th.sortable').forEach(function(th){
       const isActive = th.dataset.field === sortField;
       th.classList.toggle('active', isActive);
@@ -385,9 +414,9 @@
   }
 
   // Toggles instantly on click (no round trip needed just to
-  // open/close), and keeps openRows in sync so the next refresh -
-  // triggered by the 5s timer, sort, or search - tells the server to
-  // keep rendering this row expanded.
+  // open/close), keeps openRows in sync so the next refresh tells the
+  // server to keep rendering this row expanded, and invalidates any
+  // in-flight refresh whose snapshot of openRows is now stale.
   function toggleDetails(rowId){
     const row = document.getElementById('details-' + rowId);
     const btn = document.getElementById('chevron-' + rowId);
@@ -400,6 +429,7 @@
     } else {
       openRows.add(rowId);
     }
+    invalidatePendingDevicesFetch();
   }
 
   refreshDevices();
