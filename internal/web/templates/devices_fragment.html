@@ -1,60 +1,66 @@
 {{define "devices_fragment.html"}}
 {{if not .Rows}}
-  <tr><td colspan="5" class="empty-state">
+  <div class="empty-state">
     {{if .Query}}No devices match "{{.Query}}".{{else}}No devices seen yet. They'll appear here once they request an address.{{end}}
-  </td></tr>
+  </div>
 {{else}}
   {{range .Rows}}
-  <tr class="device-row">
-    <td class="hostname">{{.Hostname}}</td>
-    <td class="mono">{{.IP}}</td>
-    <td class="mono">{{.MAC}}</td>
-    <td>
-      {{if eq .Status "reserved"}}
-        <span class="badge reserved"><span class="dot"></span> reserved</span>
-      {{else if eq .Status "expired"}}
-        <span class="badge warn"><span class="dot"></span> expired</span>
+  <div class="device-card">
+    <div class="device-card-row">
+      <span class="k">Hostname</span>
+      {{if .Editing}}
+        <form class="rename-form" hx-post="/api/devices/rename" hx-target="#device-rows" hx-swap="innerHTML"
+              hx-vals='js:{editing: Array.from(editingRows).filter(function(id){return id !== "{{.RowID}}"}).join(",")}'
+              onsubmit="invalidatePendingDevicesFetch()">
+          <input type="hidden" name="mac" value="{{.MAC}}">
+          <input type="text" name="hostname" value="{{.Hostname}}" class="rename-input" autofocus>
+          <button type="submit" class="link-btn">Save</button>
+          <button type="button" class="link-btn" onclick="cancelEditHostname('{{.RowID}}')">Cancel</button>
+        </form>
       {{else}}
-        <span class="badge ok"><span class="dot"></span> {{.TimeLeft}}</span>
+        <span class="v">{{.Hostname}}</span>
+        <button type="button" class="link-btn" onclick="startEditHostname('{{.RowID}}')">Edit</button>
       {{end}}
-    </td>
-    <td class="chevron-cell">
-      <button type="button" class="chevron-btn{{if .Open}} open{{end}}" id="chevron-{{.RowID}}" onclick="toggleDetails('{{.RowID}}')" aria-label="Show details">▸</button>
-    </td>
-  </tr>
-  <tr class="details-row" id="details-{{.RowID}}" style="display:{{if .Open}}table-row{{else}}none{{end}};">
-    <td colspan="5">
-      <div class="details-box">
-        <div class="details-grid">
-          <div><div class="k">Status</div><div class="v">{{.Status}}</div></div>
-          <div><div class="k">Lease</div><div class="v">{{.ExpiresAbsolute}}</div></div>
-          <div><div class="k">MAC address</div><div class="v">{{.MAC}}</div></div>
-        </div>
-        {{if not .Reserved}}
-        <div class="details-actions">
-          <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML"
-                hx-vals='js:{open: Array.from(openRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
-            <input type="hidden" name="hostname" value="{{.Hostname}}">
-            <input type="hidden" name="mac" value="{{.MAC}}">
-            <input type="hidden" name="ip" value="{{.IP}}">
-            <button type="submit" class="btn-small">Pin as static reservation</button>
-          </form>
-          <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
-                hx-vals='js:{open: Array.from(openRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
-            <input type="hidden" name="mac" value="{{.MAC}}">
-            <button type="submit" class="btn-small btn-small-danger">Remove entry</button>
-          </form>
-        </div>
+    </div>
+    <div class="device-card-row"><span class="k">IP Address</span><span class="v mono">{{.IP}}</span></div>
+    <div class="device-card-row"><span class="k">MAC Address</span><span class="v mono">{{.MAC}}</span></div>
+    <div class="device-card-row">
+      <span class="k">Status</span>
+      <span class="v">
+        {{if eq .Status "reserved"}}
+          <span class="badge reserved"><span class="dot"></span> reserved</span>
+        {{else if eq .Status "expired"}}
+          <span class="badge warn"><span class="dot"></span> expired</span>
         {{else}}
+          <span class="badge ok"><span class="dot"></span> {{.TimeLeft}}</span>
+        {{end}}
+      </span>
+    </div>
+    <div class="device-card-row"><span class="k">Lease</span><span class="v">{{.ExpiresAbsolute}}</span></div>
+
+    <div class="device-card-actions">
+      {{if not .Reserved}}
+        <form hx-post="/api/reservations/quickadd" hx-target="#device-rows" hx-swap="innerHTML"
+              hx-vals='js:{editing: Array.from(editingRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
+          <input type="hidden" name="hostname" value="{{.Hostname}}">
+          <input type="hidden" name="mac" value="{{.MAC}}">
+          <input type="hidden" name="ip" value="{{.IP}}">
+          <button type="submit" class="btn-small">Pin as static reservation</button>
+        </form>
+        <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
+              hx-vals='js:{editing: Array.from(editingRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
+          <input type="hidden" name="mac" value="{{.MAC}}">
+          <button type="submit" class="btn-small btn-small-danger">Remove entry</button>
+        </form>
+      {{else}}
         <form hx-post="/api/reservations/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
-              hx-vals='js:{open: Array.from(openRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
+              hx-vals='js:{editing: Array.from(editingRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
           <input type="hidden" name="mac" value="{{.MAC}}">
           <button type="submit" class="btn-small btn-small-danger">Remove reservation</button>
         </form>
-        {{end}}
-      </div>
-    </td>
-  </tr>
+      {{end}}
+    </div>
+  </div>
   {{end}}
 {{end}}
 {{end}}

@@ -220,35 +220,53 @@
   .search-input:focus{ outline:none; border-color:var(--accent-dim); }
   .search-input::placeholder{ color:var(--text-faint); }
 
-  th.sortable{ cursor:pointer; user-select:none; }
-  th.sortable:hover{ color:var(--text-dim); }
-  th.sortable .arrow{ display:inline-block; margin-left:3px; opacity:0.5; }
-  th.sortable.active .arrow{ opacity:1; color:var(--accent); }
-
-  .chevron-cell{ width:32px; text-align:center; }
-  .chevron-btn{
-    background:none; border:none; cursor:pointer; color:var(--text-faint);
-    font-size:12px; padding:4px 8px; border-radius:4px; font-family:var(--mono);
-    transition:transform 0.15s, color 0.15s;
+  .devices-toolbar{
+    display:flex; align-items:center; gap:10px; padding:10px 20px;
+    border-bottom:1px solid var(--border); background:var(--panel-2);
   }
-  .chevron-btn:hover{ color:var(--accent); }
-  .chevron-btn.open{ transform:rotate(90deg); color:var(--accent); }
+  .toolbar-label{ font-family:var(--mono); font-size:10.5px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-faint); }
+  .sort-btn{
+    font-family:var(--sans); font-size:12.5px; font-weight:500; cursor:pointer;
+    background:transparent; border:1px solid var(--border); color:var(--text-dim);
+    padding:5px 11px; border-radius:99px;
+  }
+  .sort-btn:hover{ color:var(--text); border-color:var(--text-faint); }
+  .sort-btn.active{ color:var(--accent); border-color:var(--accent-dim); background:var(--panel); }
+  .sort-btn .arrow{ display:inline-block; margin-left:3px; opacity:0.6; }
 
-  .device-row{ cursor:default; }
-  .details-row td{ padding:0; border-bottom:1px solid var(--border); }
-  .details-box{
-    background:var(--panel-2);
+  .device-card{
     padding:16px 20px;
+    border-bottom:1px solid var(--border);
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  }
+  .device-card:last-child{ border-bottom:none; }
+  .device-card-row{
     display:flex;
     align-items:center;
-    justify-content:space-between;
-    flex-wrap:wrap;
-    gap:16px;
+    gap:10px;
   }
-  .details-actions{ display:flex; gap:10px; flex-wrap:wrap; }
-  .details-grid{ display:flex; gap:28px; flex-wrap:wrap; }
-  .details-grid .k{ font-family:var(--mono); font-size:10.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em; }
-  .details-grid .v{ font-family:var(--mono); font-size:13px; margin-top:3px; color:var(--text); }
+  .device-card-row .k{
+    font-family:var(--mono); font-size:10.5px; text-transform:uppercase; letter-spacing:0.05em;
+    color:var(--text-faint); width:100px; flex-shrink:0;
+  }
+  .device-card-row .v{ font-family:var(--sans); font-size:13.5px; color:var(--text); }
+  .device-card-row .v.mono{ font-family:var(--mono); }
+  .device-card-actions{ display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+
+  .link-btn{
+    background:none; border:none; cursor:pointer; color:var(--accent);
+    font-family:var(--sans); font-size:12px; font-weight:600; padding:0; text-decoration:underline;
+  }
+  .link-btn:hover{ opacity:0.8; }
+  .rename-form{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .rename-input{
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:5px 9px; border-radius:var(--radius); font-family:var(--sans); font-size:13.5px;
+  }
+  .rename-input:focus{ outline:none; border-color:var(--accent-dim); }
+
   .btn-small{
     font-family:var(--sans); font-size:12.5px; font-weight:600; cursor:pointer;
     background:var(--accent); color:var(--accent-hover-text); border:1px solid var(--accent);
@@ -295,20 +313,15 @@
         <input type="text" id="device-search" class="search-input" placeholder="Search hostname, IP, or MAC…"
                oninput="onSearchInput()">
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th class="sortable" data-field="hostname" onclick="setSort('hostname')">Hostname <span class="arrow">▲</span></th>
-            <th class="sortable" data-field="ip" onclick="setSort('ip')">IP address <span class="arrow">▲</span></th>
-            <th>MAC address</th>
-            <th class="sortable" data-field="status" onclick="setSort('status')">Status <span class="arrow">▲</span></th>
-            <th class="chevron-cell"></th>
-          </tr>
-        </thead>
-        <tbody id="device-rows">
-          <tr><td colspan="5" class="empty-state">loading…</td></tr>
-        </tbody>
-      </table>
+      <div class="devices-toolbar">
+        <span class="toolbar-label">Sort by</span>
+        <button type="button" class="sort-btn" data-field="hostname" onclick="setSort('hostname')">Hostname <span class="arrow">▲</span></button>
+        <button type="button" class="sort-btn" data-field="ip" onclick="setSort('ip')">IP address <span class="arrow">▲</span></button>
+        <button type="button" class="sort-btn" data-field="status" onclick="setSort('status')">Status <span class="arrow">▲</span></button>
+      </div>
+      <div id="device-rows">
+        <div class="empty-state">loading…</div>
+      </div>
     </div>
 
     <div class="section-label">Performance</div>
@@ -330,64 +343,68 @@
   tick();
   setInterval(tick, 1000);
 
-  // --- device table: search + sort + which rows are expanded, all
+  // --- device list: search + sort + which rows are mid-rename, all
   // sent to the server on every refresh so it can render the correct
-  // state directly - no client-side "fix it after the swap" step,
-  // which is what caused the earlier flicker: there's no longer a
-  // moment where a row renders collapsed and then gets corrected a
-  // beat later, since the server never sends collapsed HTML for an
-  // open row in the first place.
+  // state directly - no client-side "fix it after the swap" step.
+  // There's no expand/collapse state anymore (every card always shows
+  // full details), but the same pattern applies to hostname editing:
+  // if a row is mid-edit, the server renders the rename form directly
+  // instead of the plain hostname text.
   //
-  // On top of that: refreshDevices only actually touches the DOM when
-  // the fetched HTML differs from what's already shown. In practice
-  // that's most polls - the lease countdown text only changes once a
-  // minute, not every 5 seconds - so skipping a no-op swap avoids
-  // whatever's causing a visible flicker on unrelated re-renders,
-  // regardless of the exact cause. ---
+  // Two more layers guard against races:
+  //  1. Diff-before-swap: only touch the DOM when the fetched HTML
+  //     actually differs from what's shown, since the lease countdown
+  //     text only changes once a minute, not every 5s poll.
+  //  2. Request sequencing + abort: every fetch gets a sequence
+  //     number. Clicking Edit (or submitting Save/Cancel/Pin/Remove)
+  //     bumps the sequence and cancels whatever fetch is currently in
+  //     flight, and a response is only ever applied if it's still the
+  //     latest one issued. Without this, a poll that started *before*
+  //     a click - carrying a stale snapshot - could land *after* the
+  //     click and silently overwrite it. ---
   let sortField = 'hostname';
   let sortDir = 'asc';
   let searchTimer = null;
-  let openRows = new Set();
+  let editingRows = new Set();
   let lastDevicesHTML = null;
-
-  // requestSeq/inFlightController guard against stale-response races:
-  // a refresh's fetch is sent with a *snapshot* of openRows at the time
-  // it fires. If openRows changes afterward (user clicks a chevron) or
-  // a later refresh finishes first (network jitter), an old response
-  // landing after the fact must NOT be allowed to clobber the DOM with
-  // out-of-date open/closed state. Bumping requestSeq marks any
-  // in-flight request as stale; aborting it also stops it from wasting
-  // a swap even if it does resolve.
   let requestSeq = 0;
-  let inFlightController = null;
+  let currentAbort = null;
+
+  // Cancels any in-flight devices fetch and bumps the sequence
+  // counter, so that fetch's response - carrying a now-outdated
+  // snapshot - can never be applied even if it still completes before
+  // being aborted.
+  function invalidatePendingDevicesFetch(){
+    requestSeq++;
+    if (currentAbort) currentAbort.abort();
+  }
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
-    const seq = ++requestSeq;
-    if (inFlightController) inFlightController.abort();
-    const controller = new AbortController();
-    inFlightController = controller;
-    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, open: Array.from(openRows).join(',') });
-    fetch('/fragments/devices?' + params.toString(), { signal: controller.signal })
+    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, editing: Array.from(editingRows).join(',') });
+
+    invalidatePendingDevicesFetch();
+    const seq = requestSeq;
+    currentAbort = new AbortController();
+
+    fetch('/fragments/devices?' + params.toString(), { signal: currentAbort.signal })
       .then(function(resp){ return resp.text(); })
       .then(function(html){
-        if (seq !== requestSeq) return; // a newer request (or a local open/close) supersedes this response - drop it
+        if (seq !== requestSeq) return; // superseded by a newer poll, sort, search, or click - discard
         if (html === lastDevicesHTML) return; // nothing actually changed - don't touch the DOM at all
         lastDevicesHTML = html;
         const container = document.getElementById('device-rows');
         container.innerHTML = html;
-        htmx.process(container); // re-scan the new content so the Pin/Remove buttons' hx- attributes still work
+        htmx.process(container); // re-scan the new content so the Pin/Remove/rename forms' hx- attributes still work
       })
       .catch(function(err){
         if (err.name !== 'AbortError') console.error('refreshDevices failed:', err);
-      })
-      .finally(function(){
-        if (inFlightController === controller) inFlightController = null;
       });
-    document.querySelectorAll('th.sortable').forEach(function(th){
-      const isActive = th.dataset.field === sortField;
-      th.classList.toggle('active', isActive);
-      th.querySelector('.arrow').textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
+
+    document.querySelectorAll('.sort-btn').forEach(function(btn){
+      const isActive = btn.dataset.field === sortField;
+      btn.classList.toggle('active', isActive);
+      btn.querySelector('.arrow').textContent = isActive ? (sortDir === 'asc' ? '▲' : '▼') : '▲';
     });
   }
 
@@ -406,27 +423,20 @@
     searchTimer = setTimeout(refreshDevices, 300);
   }
 
-  // Toggles instantly on click (no round trip needed just to
-  // open/close), and keeps openRows in sync so the next refresh -
-  // triggered by the 5s timer, sort, or search - tells the server to
-  // keep rendering this row expanded.
-  function toggleDetails(rowId){
-    const row = document.getElementById('details-' + rowId);
-    const btn = document.getElementById('chevron-' + rowId);
-    if (!row) return;
-    const isOpen = row.style.display !== 'none';
-    row.style.display = isOpen ? 'none' : 'table-row';
-    if (btn) btn.classList.toggle('open', !isOpen);
-    if (isOpen) {
-      openRows.delete(rowId);
-    } else {
-      openRows.add(rowId);
-    }
-    // openRows just changed, so any refresh already in flight was sent
-    // with a stale snapshot - invalidate it (requestSeq) and abort it
-    // so it can't land afterward and flip this row back.
-    requestSeq++;
-    if (inFlightController) inFlightController.abort();
+  // Switches a card's hostname into edit mode: marks it in
+  // editingRows, invalidates any in-flight poll (its snapshot is now
+  // stale), and refreshes immediately so the rename form appears right
+  // away instead of waiting for the next periodic poll.
+  function startEditHostname(rowId){
+    editingRows.add(rowId);
+    invalidatePendingDevicesFetch();
+    refreshDevices();
+  }
+
+  function cancelEditHostname(rowId){
+    editingRows.delete(rowId);
+    invalidatePendingDevicesFetch();
+    refreshDevices();
   }
 
   refreshDevices();

@@ -65,9 +65,10 @@ type Config struct {
 	ListenAddr string `json:"listen_addr"`
 
 	// Data
-	Reservations []Reservation `json:"reservations"`
-	DNSRecords   []DNSRecord   `json:"dns_records"`
-	Leases       []Lease       `json:"leases"`
+	Reservations      []Reservation     `json:"reservations"`
+	DNSRecords        []DNSRecord       `json:"dns_records"`
+	Leases            []Lease           `json:"leases"`
+	HostnameOverrides map[string]string `json:"hostname_overrides"` // MAC -> user-assigned name, takes priority over whatever DHCP reports
 
 	path string       // where this config was loaded from / saves to
 	mu   sync.RWMutex // guards all fields above during concurrent access
@@ -77,21 +78,22 @@ type Config struct {
 // when no config file exists yet (first run).
 func Default(path string) *Config {
 	return &Config{
-		WANInterface:    "wlp2s0",
-		LANInterface:    "enp1s0",
-		LANAddress:      "192.168.2.1",
-		SubnetMask:      "255.255.255.0",
-		PoolStart:       "192.168.2.10",
-		PoolEnd:         "192.168.2.254",
-		LeaseSeconds:    86400,
-		Domain:          "lan",
-		DNSMode:         "forward",
-		UpstreamServers: []string{"1.1.1.1:53", "9.9.9.9:53"},
-		ListenAddr:      "0.0.0.0:8070",
-		Reservations:    []Reservation{},
-		DNSRecords:      []DNSRecord{},
-		Leases:          []Lease{},
-		path:            path,
+		WANInterface:      "wlp2s0",
+		LANInterface:      "enp1s0",
+		LANAddress:        "192.168.2.1",
+		SubnetMask:        "255.255.255.0",
+		PoolStart:         "192.168.2.10",
+		PoolEnd:           "192.168.2.254",
+		LeaseSeconds:      86400,
+		Domain:            "lan",
+		DNSMode:           "forward",
+		UpstreamServers:   []string{"1.1.1.1:53", "9.9.9.9:53"},
+		ListenAddr:        "0.0.0.0:8070",
+		Reservations:      []Reservation{},
+		DNSRecords:        []DNSRecord{},
+		Leases:            []Lease{},
+		HostnameOverrides: map[string]string{},
+		path:              path,
 	}
 }
 
@@ -111,6 +113,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	c.path = path
+	if c.HostnameOverrides == nil {
+		c.HostnameOverrides = map[string]string{} // older config files predate this field
+	}
 	return c, nil
 }
 
@@ -144,20 +149,21 @@ func (c *Config) saveLocked() error {
 // embeds sync.RWMutex, even a freshly-built one, so a separate type is
 // the clean way to hand out read-only data.
 type Snapshot struct {
-	WANInterface    string
-	LANInterface    string
-	LANAddress      string
-	SubnetMask      string
-	PoolStart       string
-	PoolEnd         string
-	LeaseSeconds    int
-	Domain          string
-	DNSMode         string
-	UpstreamServers []string
-	ListenAddr      string
-	Reservations    []Reservation
-	DNSRecords      []DNSRecord
-	Leases          []Lease
+	WANInterface      string
+	LANInterface      string
+	LANAddress        string
+	SubnetMask        string
+	PoolStart         string
+	PoolEnd           string
+	LeaseSeconds      int
+	Domain            string
+	DNSMode           string
+	UpstreamServers   []string
+	ListenAddr        string
+	Reservations      []Reservation
+	DNSRecords        []DNSRecord
+	Leases            []Lease
+	HostnameOverrides map[string]string
 }
 
 // Snapshot returns a value copy of the config's data fields, safe to
@@ -167,21 +173,30 @@ func (c *Config) Snapshot() Snapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return Snapshot{
-		WANInterface:    c.WANInterface,
-		LANInterface:    c.LANInterface,
-		LANAddress:      c.LANAddress,
-		SubnetMask:      c.SubnetMask,
-		PoolStart:       c.PoolStart,
-		PoolEnd:         c.PoolEnd,
-		LeaseSeconds:    c.LeaseSeconds,
-		Domain:          c.Domain,
-		DNSMode:         c.DNSMode,
-		UpstreamServers: append([]string{}, c.UpstreamServers...),
-		ListenAddr:      c.ListenAddr,
-		Reservations:    append([]Reservation{}, c.Reservations...),
-		DNSRecords:      append([]DNSRecord{}, c.DNSRecords...),
-		Leases:          append([]Lease{}, c.Leases...),
+		WANInterface:      c.WANInterface,
+		LANInterface:      c.LANInterface,
+		LANAddress:        c.LANAddress,
+		SubnetMask:        c.SubnetMask,
+		PoolStart:         c.PoolStart,
+		PoolEnd:           c.PoolEnd,
+		LeaseSeconds:      c.LeaseSeconds,
+		Domain:            c.Domain,
+		DNSMode:           c.DNSMode,
+		UpstreamServers:   append([]string{}, c.UpstreamServers...),
+		ListenAddr:        c.ListenAddr,
+		Reservations:      append([]Reservation{}, c.Reservations...),
+		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
+		Leases:            append([]Lease{}, c.Leases...),
+		HostnameOverrides: copyStringMap(c.HostnameOverrides),
 	}
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // ReservationForMAC returns the static reservation for a MAC address, if
@@ -199,6 +214,28 @@ func (c *Config) ReservationForMAC(mac string) (Reservation, bool) {
 
 // AddReservation adds or updates a static MAC->IP reservation and
 // persists the change immediately.
+// SetHostnameOverride assigns a user-chosen display name to a MAC
+// address, taking priority over whatever hostname DHCP reports for it
+// from now on. Passing an empty hostname clears the override, letting
+// the DHCP-reported name (or "(unknown)" if the device never sends
+// one) show through again. This exists specifically because a plain
+// edit to a dynamic lease's Hostname field would just get overwritten
+// on the device's next DHCP renewal - the override is a separate,
+// durable layer on top of that.
+func (c *Config) SetHostnameOverride(mac, hostname string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.HostnameOverrides == nil {
+		c.HostnameOverrides = map[string]string{}
+	}
+	if hostname == "" {
+		delete(c.HostnameOverrides, mac)
+	} else {
+		c.HostnameOverrides[mac] = hostname
+	}
+	return c.saveLocked()
+}
+
 func (c *Config) AddReservation(r Reservation) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

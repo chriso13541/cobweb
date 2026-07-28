@@ -70,6 +70,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
 	mux.HandleFunc("/api/reservations/quickremove", s.requireAuth(s.handleQuickRemoveReservation))
 	mux.HandleFunc("/api/leases/quickremove", s.requireAuth(s.handleQuickRemoveLease))
+	mux.HandleFunc("/api/devices/rename", s.requireAuth(s.handleRenameDevice))
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
@@ -206,26 +207,42 @@ type deviceRow struct {
 	TimeLeft        string
 	ExpiresAbsolute string
 	Reserved        bool
-	Open            bool // whether this row's details are expanded
+	Editing         bool // whether this row is currently showing the rename form
 }
 
-// handleDevicesFragment returns the device table body, built from
+// resolveHostname applies the priority order for what name to show for
+// a device: a user-set override always wins (it exists specifically to
+// survive DHCP renewals overwriting it), then whatever hostname was
+// actually reported (by DHCP or a reservation), then a fallback for
+// devices that never report one at all.
+func resolveHostname(overrides map[string]string, mac, reported string) string {
+	if override, ok := overrides[mac]; ok && override != "" {
+		return override
+	}
+	if reported == "" {
+		return "(unknown)"
+	}
+	return reported
+}
+
+// handleDevicesFragment returns the device list body, built from
 // current DHCP leases and static reservations - both live in cobweb's
 // own config now, no external lease file to parse. Supports optional
 // ?q=, ?sort=, ?dir= query params for search and sorting, and an
-// "open" param (comma-separated row IDs) so the dashboard's periodic
-// refresh can tell the server which rows should render already
-// expanded. Baking that into the initial HTML - rather than rendering
-// collapsed and then correcting it client-side after the fact - is
-// what avoids a visible flicker every refresh cycle.
+// "editing" param (comma-separated row IDs) so the dashboard's
+// periodic refresh can tell the server which rows should render their
+// rename form instead of the plain hostname - baking that into the
+// initial HTML, rather than rendering plain and correcting it
+// client-side after the fact, is what avoids a mid-edit row getting
+// silently reset by the next refresh.
 func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 	snap := s.cfg.Snapshot()
 	now := time.Now()
 
-	openIDs := map[string]bool{}
-	for _, id := range strings.Split(r.FormValue("open"), ",") {
+	editingIDs := map[string]bool{}
+	for _, id := range strings.Split(r.FormValue("editing"), ",") {
 		if id = strings.TrimSpace(id); id != "" {
-			openIDs[id] = true
+			editingIDs[id] = true
 		}
 	}
 
@@ -236,14 +253,14 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 		id := rowID(res.MAC)
 		rows = append(rows, deviceRow{
 			RowID:           id,
-			Hostname:        displayHostname(res.Hostname),
+			Hostname:        resolveHostname(snap.HostnameOverrides, res.MAC, res.Hostname),
 			IP:              res.IP,
 			MAC:             res.MAC,
 			Status:          "reserved",
 			TimeLeft:        "static",
 			ExpiresAbsolute: "Permanent (static reservation)",
 			Reserved:        true,
-			Open:            openIDs[id],
+			Editing:         editingIDs[id],
 		})
 		seen[res.MAC] = true
 	}
@@ -260,14 +277,14 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 		id := rowID(l.MAC)
 		rows = append(rows, deviceRow{
 			RowID:           id,
-			Hostname:        displayHostname(l.Hostname),
+			Hostname:        resolveHostname(snap.HostnameOverrides, l.MAC, l.Hostname),
 			IP:              l.IP,
 			MAC:             l.MAC,
 			Status:          st,
 			TimeLeft:        formatTimeLeft(expires, now),
 			ExpiresAbsolute: expires.Format("Jan 2, 3:04 PM"),
 			Reserved:        false,
-			Open:            openIDs[id],
+			Editing:         editingIDs[id],
 		})
 	}
 
@@ -517,6 +534,34 @@ func (s *Server) handleQuickRemoveLease(w http.ResponseWriter, r *http.Request) 
 	s.handleDevicesFragment(w, r)
 }
 
+// handleRenameDevice sets a persistent display-name override for a
+// device. This is deliberately separate from just editing the
+// Lease/Reservation's Hostname field directly: for a dynamic (non
+// -reserved) device, that field gets overwritten by whatever the
+// device itself reports on its next DHCP renewal, which would quietly
+// undo a plain rename within a day. The override lives in its own map
+// and always takes priority, so it survives renewals indefinitely -
+// exactly what you'd want for permanently relabeling a device that
+// keeps showing up as "(unknown)".
+func (s *Server) handleRenameDevice(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	mac := strings.TrimSpace(r.FormValue("mac"))
+	hostname := strings.TrimSpace(r.FormValue("hostname"))
+	if mac == "" {
+		http.Error(w, "mac is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.cfg.SetHostnameOverride(mac, hostname); err != nil {
+		log.Printf("rename device: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.handleDevicesFragment(w, r)
+}
+
 func (s *Server) handleAddDNSRecord(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -617,13 +662,6 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- small helpers ---
-
-func displayHostname(h string) string {
-	if h == "" {
-		return "(unknown)"
-	}
-	return h
-}
 
 func formatTimeLeft(expiresAt, now time.Time) string {
 	if expiresAt.Before(now) {
