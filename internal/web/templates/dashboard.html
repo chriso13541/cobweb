@@ -440,7 +440,15 @@
   }
 
   refreshDevices();
-  setInterval(refreshDevices, 5000);
+  setInterval(function(){
+    // Skip the automatic poll entirely while a hostname's being
+    // edited - there's no way to preserve unsaved keystrokes across a
+    // full re-render, so the simplest correct behavior is to just not
+    // touch the DOM at all until the edit is explicitly finished
+    // (Save or Cancel), both of which already trigger their own
+    // immediate refresh.
+    if (editingRows.size === 0) refreshDevices();
+  }, 5000);
 </script>
 </body>
 </html>

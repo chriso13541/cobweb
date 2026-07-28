@@ -10,8 +10,8 @@
       <span class="k">Hostname</span>
       {{if .Editing}}
         <form class="rename-form" hx-post="/api/devices/rename" hx-target="#device-rows" hx-swap="innerHTML"
-              hx-vals='js:{editing: Array.from(editingRows).filter(function(id){return id !== "{{.RowID}}"}).join(",")}'
-              onsubmit="invalidatePendingDevicesFetch()">
+              hx-vals='js:{editing: Array.from(editingRows).join(",")}'
+              onsubmit="editingRows.delete('{{.RowID}}'); invalidatePendingDevicesFetch();">
           <input type="hidden" name="mac" value="{{.MAC}}">
           <input type="text" name="hostname" value="{{.Hostname}}" class="rename-input" autofocus>
           <button type="submit" class="link-btn">Save</button>
