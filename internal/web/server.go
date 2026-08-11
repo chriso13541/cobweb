@@ -38,6 +38,9 @@ var templateFS embed.FS
 func New(cfg *config.Config, creds *auth.Store) (*Server, error) {
 	funcs := template.FuncMap{
 		"join": strings.Join,
+		"segmentName": func(segments []config.LANSegment, id string) string {
+			return segmentDisplayName(segments, id)
+		},
 	}
 	tmpl, err := template.New("").Funcs(funcs).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
@@ -74,6 +77,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
+	mux.HandleFunc("/api/segments/add", s.requireAuth(s.handleAddLANSegment))
+	mux.HandleFunc("/api/segments/remove", s.requireAuth(s.handleRemoveLANSegment))
 	mux.HandleFunc("/api/account/update", s.requireAuth(s.handleAccountUpdate))
 
 	return mux
@@ -207,7 +212,9 @@ type deviceRow struct {
 	TimeLeft        string
 	ExpiresAbsolute string
 	Reserved        bool
-	Editing         bool // whether this row is currently showing the rename form
+	Editing         bool   // whether this row is currently showing the rename form
+	Segment         string // display name of the LAN segment this device is on
+	SegmentID       string // raw segment ID, for quick-action forms that need to preserve it
 }
 
 // resolveHostname applies the priority order for what name to show for
@@ -223,6 +230,22 @@ func resolveHostname(overrides map[string]string, mac, reported string) string {
 		return "(unknown)"
 	}
 	return reported
+}
+
+// segmentDisplayName looks up a segment's Name by ID from a snapshot's
+// LANSegments, falling back to something sensible if the segment no
+// longer exists (e.g. it was removed via Settings after this entry
+// was created).
+func segmentDisplayName(segments []config.LANSegment, segmentID string) string {
+	for _, s := range segments {
+		if s.ID == segmentID {
+			return s.Name
+		}
+	}
+	if segmentID == "" {
+		return "—"
+	}
+	return "(removed)"
 }
 
 // handleDevicesFragment returns the device list body, built from
@@ -261,6 +284,8 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			ExpiresAbsolute: "Permanent (static reservation)",
 			Reserved:        true,
 			Editing:         editingIDs[id],
+			Segment:         segmentDisplayName(snap.LANSegments, res.SegmentID),
+			SegmentID:       res.SegmentID,
 		})
 		seen[res.MAC] = true
 	}
@@ -285,6 +310,8 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			ExpiresAbsolute: expires.Format("Jan 2, 3:04 PM"),
 			Reserved:        false,
 			Editing:         editingIDs[id],
+			Segment:         segmentDisplayName(snap.LANSegments, l.SegmentID),
+			SegmentID:       l.SegmentID,
 		})
 	}
 
@@ -337,6 +364,16 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// segmentPanel is one LAN segment's interface stats + DHCP status, for
+// the interfaces panel - one of these per configured VLAN.
+type segmentPanel struct {
+	Name    string
+	Iface   netstat.Interface
+	Rx, Tx  string
+	DHCPUp  bool
+	DHCPErr string
+}
+
 func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request) {
 	snap := s.cfg.Snapshot()
 
@@ -344,29 +381,44 @@ func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		log.Printf("stat wan interface %s: %v", snap.WANInterface, err)
 	}
-	lan, err := netstat.Stat(snap.LANInterface)
-	if err != nil {
-		log.Printf("stat lan interface %s: %v", snap.LANInterface, err)
+
+	dhcpBySegment := map[string]status.DHCPSegmentState{}
+	for _, st := range status.DHCPSegmentStates() {
+		dhcpBySegment[st.SegmentID] = st
 	}
 
-	dhcpState, dnsState := status.Snapshot()
+	segments := make([]segmentPanel, 0, len(snap.LANSegments))
+	for _, seg := range snap.LANSegments {
+		iface, err := netstat.Stat(seg.Interface)
+		if err != nil {
+			log.Printf("stat lan interface %s (%s): %v", seg.Interface, seg.Name, err)
+		}
+		dhcp := dhcpBySegment[seg.ID]
+		segments = append(segments, segmentPanel{
+			Name:    seg.Name,
+			Iface:   iface,
+			Rx:      netstat.HumanBytes(iface.RxBytes),
+			Tx:      netstat.HumanBytes(iface.TxBytes),
+			DHCPUp:  dhcp.Up,
+			DHCPErr: dhcp.LastErr,
+		})
+	}
+
+	dnsState := status.DNSState()
 
 	data := struct {
-		WAN, LAN                   netstat.Interface
-		WANRx, WANTx, LANRx, LANTx string
-		DHCPUp, DNSUp              bool
-		DHCPErr, DNSErr            string
+		WAN          netstat.Interface
+		WANRx, WANTx string
+		DNSUp        bool
+		DNSErr       string
+		Segments     []segmentPanel
 	}{
-		WAN:     wan,
-		LAN:     lan,
-		WANRx:   netstat.HumanBytes(wan.RxBytes),
-		WANTx:   netstat.HumanBytes(wan.TxBytes),
-		LANRx:   netstat.HumanBytes(lan.RxBytes),
-		LANTx:   netstat.HumanBytes(lan.TxBytes),
-		DHCPUp:  dhcpState.Up,
-		DNSUp:   dnsState.Up,
-		DHCPErr: dhcpState.LastErr,
-		DNSErr:  dnsState.LastErr,
+		WAN:      wan,
+		WANRx:    netstat.HumanBytes(wan.RxBytes),
+		WANTx:    netstat.HumanBytes(wan.TxBytes),
+		DNSUp:    dnsState.Up,
+		DNSErr:   dnsState.LastErr,
+		Segments: segments,
 	}
 
 	if err := s.tmpl.ExecuteTemplate(w, "interfaces_fragment.html", data); err != nil {
@@ -440,12 +492,13 @@ func (s *Server) handleAddReservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := config.Reservation{
-		MAC:      strings.TrimSpace(r.FormValue("mac")),
-		IP:       strings.TrimSpace(r.FormValue("ip")),
-		Hostname: strings.TrimSpace(r.FormValue("hostname")),
+		MAC:       strings.TrimSpace(r.FormValue("mac")),
+		IP:        strings.TrimSpace(r.FormValue("ip")),
+		Hostname:  strings.TrimSpace(r.FormValue("hostname")),
+		SegmentID: strings.TrimSpace(r.FormValue("segment_id")),
 	}
-	if res.MAC == "" || res.IP == "" {
-		http.Error(w, "mac and ip are required", http.StatusBadRequest)
+	if res.MAC == "" || res.IP == "" || res.SegmentID == "" {
+		http.Error(w, "mac, ip, and segment are required", http.StatusBadRequest)
 		return
 	}
 	if err := s.cfg.AddReservation(res); err != nil {
@@ -481,9 +534,10 @@ func (s *Server) handleQuickReserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := config.Reservation{
-		MAC:      strings.TrimSpace(r.FormValue("mac")),
-		IP:       strings.TrimSpace(r.FormValue("ip")),
-		Hostname: strings.TrimSpace(r.FormValue("hostname")),
+		MAC:       strings.TrimSpace(r.FormValue("mac")),
+		IP:        strings.TrimSpace(r.FormValue("ip")),
+		Hostname:  strings.TrimSpace(r.FormValue("hostname")),
+		SegmentID: strings.TrimSpace(r.FormValue("segment_id")),
 	}
 	if res.MAC == "" || res.IP == "" {
 		http.Error(w, "mac and ip are required", http.StatusBadRequest)
@@ -612,14 +666,8 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		upstream[i] = strings.TrimSpace(upstream[i])
 	}
 
-	err = s.cfg.UpdateNetwork(
+	err = s.cfg.UpdateGlobalNetwork(
 		strings.TrimSpace(r.FormValue("wan_interface")),
-		strings.TrimSpace(r.FormValue("lan_interface")),
-		strings.TrimSpace(r.FormValue("lan_address")),
-		strings.TrimSpace(r.FormValue("subnet_mask")),
-		strings.TrimSpace(r.FormValue("pool_start")),
-		strings.TrimSpace(r.FormValue("pool_end")),
-		strings.TrimSpace(r.FormValue("domain")),
 		strings.TrimSpace(r.FormValue("dns_mode")),
 		leaseSeconds,
 		upstream,
@@ -630,6 +678,56 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderSettings(w, r, "", "")
+}
+
+// handleAddLANSegment adds a new VLAN/LAN segment from the settings
+// page. Note that adding or removing a segment here doesn't start or
+// stop its DHCP listener goroutine on its own - that only happens at
+// process startup (see main.go), so a person needs to restart cobweb
+// for a newly-added segment to actually begin serving DHCP. The
+// dashboard will reflect this: a segment with no DHCP status reported
+// yet just shows as "not running" until the next restart.
+func (s *Server) handleAddLANSegment(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	seg := config.LANSegment{
+		Name:       strings.TrimSpace(r.FormValue("name")),
+		Interface:  strings.TrimSpace(r.FormValue("interface")),
+		Address:    strings.TrimSpace(r.FormValue("address")),
+		SubnetMask: strings.TrimSpace(r.FormValue("subnet_mask")),
+		PoolStart:  strings.TrimSpace(r.FormValue("pool_start")),
+		PoolEnd:    strings.TrimSpace(r.FormValue("pool_end")),
+		Domain:     strings.TrimSpace(r.FormValue("domain")),
+	}
+	if seg.Name == "" || seg.Interface == "" || seg.Address == "" || seg.SubnetMask == "" || seg.PoolStart == "" || seg.PoolEnd == "" {
+		http.Error(w, "all segment fields are required", http.StatusBadRequest)
+		return
+	}
+	if seg.Domain == "" {
+		seg.Domain = "lan"
+	}
+	if _, err := s.cfg.AddLANSegment(seg); err != nil {
+		log.Printf("add lan segment: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.renderSettings(w, r, "", "Segment added. Restart cobweb for its DHCP listener to start.")
+}
+
+func (s *Server) handleRemoveLANSegment(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.FormValue("id"))
+	if err := s.cfg.RemoveLANSegment(id); err != nil {
+		log.Printf("remove lan segment: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.renderSettings(w, r, "", "Segment removed. Restart cobweb to stop its DHCP listener.")
 }
 
 func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {

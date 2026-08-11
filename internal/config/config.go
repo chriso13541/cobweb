@@ -8,6 +8,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -15,13 +17,30 @@ import (
 	"sync"
 )
 
+// LANSegment is one routed LAN - in practice, usually one VLAN with its
+// own 802.1q subinterface (e.g. enp1s0.20), its own subnet, and its own
+// DHCP pool. cobweb runs one DHCP listener per segment, all sharing the
+// same reservation/lease/DNS-override data (each entry just records
+// which segment it belongs to).
+type LANSegment struct {
+	ID         string `json:"id"`          // stable, immutable - generated once, never changes even if Name/Interface do
+	Name       string `json:"name"`        // display label, e.g. "Trusted", "IoT", "Guest"
+	Interface  string `json:"interface"`   // e.g. "enp1s0" for a flat LAN, or "enp1s0.20" for a VLAN subinterface
+	Address    string `json:"address"`     // this segment's own gateway IP, e.g. 192.168.20.1
+	SubnetMask string `json:"subnet_mask"` // e.g. 255.255.255.0
+	PoolStart  string `json:"pool_start"`
+	PoolEnd    string `json:"pool_end"`
+	Domain     string `json:"domain"` // local DNS suffix for this segment, e.g. "lan"
+}
+
 // Reservation pins a specific MAC address to a specific IP address,
 // permanently, regardless of the dynamic pool. This is the equivalent of
 // a router's "DHCP reservation" feature.
 type Reservation struct {
-	MAC      string `json:"mac"`
-	IP       string `json:"ip"`
-	Hostname string `json:"hostname"`
+	MAC       string `json:"mac"`
+	IP        string `json:"ip"`
+	Hostname  string `json:"hostname"`
+	SegmentID string `json:"segment_id"` // which LANSegment this reservation belongs to
 }
 
 // DNSRecord is a manually-defined local DNS entry, independent of
@@ -40,24 +59,21 @@ type Lease struct {
 	IP        string `json:"ip"`
 	Hostname  string `json:"hostname"`
 	ExpiresAt int64  `json:"expires_at"` // unix seconds
+	SegmentID string `json:"segment_id"` // which LANSegment this lease was allocated from
 }
 
 // Config holds every setting cobweb needs across its DHCP server, DNS
 // server, and web dashboard.
 type Config struct {
 	// Interfaces
-	WANInterface string `json:"wan_interface"`
-	LANInterface string `json:"lan_interface"`
+	WANInterface string       `json:"wan_interface"`
+	LANSegments  []LANSegment `json:"lan_segments"`
 
-	// Network
-	LANAddress   string `json:"lan_address"`   // this box's own address on the LAN, e.g. 192.168.2.1
-	SubnetMask   string `json:"subnet_mask"`   // e.g. 255.255.255.0
-	PoolStart    string `json:"pool_start"`    // e.g. 192.168.2.10
-	PoolEnd      string `json:"pool_end"`      // e.g. 192.168.2.254
-	LeaseSeconds int    `json:"lease_seconds"` // default lease duration
+	// DHCP (shared across all segments)
+	LeaseSeconds int `json:"lease_seconds"` // default lease duration
 
-	// DNS
-	Domain          string   `json:"domain"`           // local suffix, e.g. "lan"
+	// DNS (one shared resolver regardless of which segment a query
+	// comes from - see the design note in dnsserver's package doc)
 	DNSMode         string   `json:"dns_mode"`         // "forward" (default) or "recursive"
 	UpstreamServers []string `json:"upstream_servers"` // e.g. ["1.1.1.1:53", "9.9.9.9:53"] - used when dns_mode is "forward"
 
@@ -74,18 +90,53 @@ type Config struct {
 	mu   sync.RWMutex // guards all fields above during concurrent access
 }
 
-// Default returns a Config populated with sane starting values. Used
-// when no config file exists yet (first run).
+// legacyFields captures the pre-VLAN single-LAN shape, used only to
+// migrate an old config.json (which has these keys at the top level
+// instead of inside lan_segments) the first time it's loaded after
+// upgrading.
+type legacyFields struct {
+	LANInterface string `json:"lan_interface"`
+	LANAddress   string `json:"lan_address"`
+	SubnetMask   string `json:"subnet_mask"`
+	PoolStart    string `json:"pool_start"`
+	PoolEnd      string `json:"pool_end"`
+	Domain       string `json:"domain"`
+}
+
+// newSegmentID generates a short, random, stable identifier for a new
+// LANSegment - deliberately independent of Name or Interface, since
+// both of those can be edited later without breaking whichever DHCP
+// listener goroutine is tracking this segment.
+func newSegmentID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failing is essentially unheard of on Linux, but
+		// fall back to something still unique-enough rather than panic.
+		return "seg-fallback"
+	}
+	return "seg-" + hex.EncodeToString(b)
+}
+
+// Default returns a Config populated with sane starting values,
+// including exactly one LAN segment matching what a fresh install
+// used before VLAN support existed - so a brand-new install still
+// works immediately without requiring Settings configuration first.
 func Default(path string) *Config {
 	return &Config{
-		WANInterface:      "wlp2s0",
-		LANInterface:      "enp1s0",
-		LANAddress:        "192.168.2.1",
-		SubnetMask:        "255.255.255.0",
-		PoolStart:         "192.168.2.10",
-		PoolEnd:           "192.168.2.254",
+		WANInterface: "wlp2s0",
+		LANSegments: []LANSegment{
+			{
+				ID:         newSegmentID(),
+				Name:       "Default",
+				Interface:  "enp1s0",
+				Address:    "192.168.2.1",
+				SubnetMask: "255.255.255.0",
+				PoolStart:  "192.168.2.10",
+				PoolEnd:    "192.168.2.254",
+				Domain:     "lan",
+			},
+		},
 		LeaseSeconds:      86400,
-		Domain:            "lan",
 		DNSMode:           "forward",
 		UpstreamServers:   []string{"1.1.1.1:53", "9.9.9.9:53"},
 		ListenAddr:        "0.0.0.0:8070",
@@ -98,7 +149,9 @@ func Default(path string) *Config {
 }
 
 // Load reads config from path, or returns a fresh Default config (not
-// yet saved to disk) if the file doesn't exist yet.
+// yet saved to disk) if the file doesn't exist yet. Automatically
+// migrates an older single-LAN config.json into a one-segment
+// LANSegments list the first time it's loaded after upgrading.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -116,6 +169,49 @@ func Load(path string) (*Config, error) {
 	if c.HostnameOverrides == nil {
 		c.HostnameOverrides = map[string]string{} // older config files predate this field
 	}
+
+	if len(c.LANSegments) == 0 {
+		var legacy legacyFields
+		// Only the old top-level keys matter here; ignore anything else.
+		if err := json.Unmarshal(b, &legacy); err == nil && legacy.LANInterface != "" {
+			domain := legacy.Domain
+			if domain == "" {
+				domain = "lan"
+			}
+			seg := LANSegment{
+				ID:         newSegmentID(),
+				Name:       "Default",
+				Interface:  legacy.LANInterface,
+				Address:    legacy.LANAddress,
+				SubnetMask: legacy.SubnetMask,
+				PoolStart:  legacy.PoolStart,
+				PoolEnd:    legacy.PoolEnd,
+				Domain:     domain,
+			}
+			c.LANSegments = []LANSegment{seg}
+			// Tag any pre-existing leases/reservations (which predate
+			// segments entirely, so have no SegmentID yet) as
+			// belonging to this migrated segment.
+			for i := range c.Reservations {
+				if c.Reservations[i].SegmentID == "" {
+					c.Reservations[i].SegmentID = seg.ID
+				}
+			}
+			for i := range c.Leases {
+				if c.Leases[i].SegmentID == "" {
+					c.Leases[i].SegmentID = seg.ID
+				}
+			}
+			// Persist the migration immediately so it only ever runs
+			// once. Safe to call saveLocked directly without taking
+			// the lock here - this *Config hasn't been shared with
+			// any other goroutine yet at this point in Load.
+			if err := c.saveLocked(); err != nil {
+				return nil, fmt.Errorf("persist migrated config: %w", err)
+			}
+		}
+	}
+
 	return c, nil
 }
 
@@ -150,13 +246,8 @@ func (c *Config) saveLocked() error {
 // the clean way to hand out read-only data.
 type Snapshot struct {
 	WANInterface      string
-	LANInterface      string
-	LANAddress        string
-	SubnetMask        string
-	PoolStart         string
-	PoolEnd           string
+	LANSegments       []LANSegment
 	LeaseSeconds      int
-	Domain            string
 	DNSMode           string
 	UpstreamServers   []string
 	ListenAddr        string
@@ -174,13 +265,8 @@ func (c *Config) Snapshot() Snapshot {
 	defer c.mu.RUnlock()
 	return Snapshot{
 		WANInterface:      c.WANInterface,
-		LANInterface:      c.LANInterface,
-		LANAddress:        c.LANAddress,
-		SubnetMask:        c.SubnetMask,
-		PoolStart:         c.PoolStart,
-		PoolEnd:           c.PoolEnd,
+		LANSegments:       append([]LANSegment{}, c.LANSegments...),
 		LeaseSeconds:      c.LeaseSeconds,
-		Domain:            c.Domain,
 		DNSMode:           c.DNSMode,
 		UpstreamServers:   append([]string{}, c.UpstreamServers...),
 		ListenAddr:        c.ListenAddr,
@@ -199,8 +285,68 @@ func copyStringMap(m map[string]string) map[string]string {
 	return out
 }
 
+// SegmentByID returns the segment with the given ID, if it still
+// exists (it may have been removed via Settings since whatever code
+// called this last looked it up).
+func (c *Config) SegmentByID(id string) (LANSegment, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, s := range c.LANSegments {
+		if s.ID == id {
+			return s, true
+		}
+	}
+	return LANSegment{}, false
+}
+
+// AddLANSegment adds a new VLAN/LAN segment. Its ID is generated here,
+// ignoring anything the caller supplied, since IDs must be unique and
+// immutable for the lifetime of the segment.
+func (c *Config) AddLANSegment(seg LANSegment) (LANSegment, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seg.ID = newSegmentID()
+	c.LANSegments = append(c.LANSegments, seg)
+	return seg, c.saveLocked()
+}
+
+// UpdateLANSegment updates an existing segment's editable fields
+// (Name, Interface, Address, SubnetMask, PoolStart, PoolEnd, Domain),
+// keyed by its immutable ID.
+func (c *Config) UpdateLANSegment(id string, updated LANSegment) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, s := range c.LANSegments {
+		if s.ID == id {
+			updated.ID = id // ID itself is never editable
+			c.LANSegments[i] = updated
+			return c.saveLocked()
+		}
+	}
+	return fmt.Errorf("segment %q not found", id)
+}
+
+// RemoveLANSegment deletes a segment. Any reservations/leases that
+// belonged to it are left in place (they'll just show an unresolved
+// segment reference) rather than silently deleted, since a person
+// might remove a segment by mistake and want their reservations back
+// after re-adding it.
+func (c *Config) RemoveLANSegment(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.LANSegments[:0]
+	for _, s := range c.LANSegments {
+		if s.ID != id {
+			out = append(out, s)
+		}
+	}
+	c.LANSegments = out
+	return c.saveLocked()
+}
+
 // ReservationForMAC returns the static reservation for a MAC address, if
-// one exists.
+// one exists. MAC addresses are globally unique, so this doesn't need
+// to know which segment to look in.
 func (c *Config) ReservationForMAC(mac string) (Reservation, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -212,8 +358,6 @@ func (c *Config) ReservationForMAC(mac string) (Reservation, bool) {
 	return Reservation{}, false
 }
 
-// AddReservation adds or updates a static MAC->IP reservation and
-// persists the change immediately.
 // SetHostnameOverride assigns a user-chosen display name to a MAC
 // address, taking priority over whatever hostname DHCP reports for it
 // from now on. Passing an empty hostname clears the override, letting
@@ -236,6 +380,8 @@ func (c *Config) SetHostnameOverride(mac, hostname string) error {
 	return c.saveLocked()
 }
 
+// AddReservation adds or updates a static MAC->IP reservation and
+// persists the change immediately.
 func (c *Config) AddReservation(r Reservation) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -338,8 +484,10 @@ func (c *Config) RemoveLease(mac string) error {
 }
 
 // IPInUse reports whether ip is currently held by any active lease or
-// reservation other than excludeMAC. Used by the pool allocator to avoid
-// double-assigning an address.
+// reservation other than excludeMAC. Used by the pool allocator to
+// avoid double-assigning an address. Deliberately checks across all
+// segments, not just the caller's own one - a plain safety net against
+// two segments' subnets accidentally overlapping.
 func (c *Config) IPInUse(ip string, excludeMAC string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -356,33 +504,35 @@ func (c *Config) IPInUse(ip string, excludeMAC string) bool {
 	return false
 }
 
-// UpdateNetwork applies new network/DHCP/DNS settings from the settings
-// page in one atomic write.
-func (c *Config) UpdateNetwork(wan, lan, lanAddr, mask, poolStart, poolEnd, domain, dnsMode string, leaseSeconds int, upstream []string) error {
+// UpdateGlobalNetwork applies the settings that apply across every
+// segment at once: the WAN interface, DHCP lease duration, and DNS
+// mode/upstream servers. Per-segment settings (interface, subnet,
+// pool, domain) go through AddLANSegment/UpdateLANSegment instead.
+func (c *Config) UpdateGlobalNetwork(wan, dnsMode string, leaseSeconds int, upstream []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.WANInterface = wan
-	c.LANInterface = lan
-	c.LANAddress = lanAddr
-	c.SubnetMask = mask
-	c.PoolStart = poolStart
-	c.PoolEnd = poolEnd
-	c.Domain = domain
 	c.DNSMode = dnsMode
 	c.LeaseSeconds = leaseSeconds
 	c.UpstreamServers = upstream
 	return c.saveLocked()
 }
 
-// ParsePoolRange returns the start and end of the dynamic pool as
-// 4-byte IPs, for the allocator to iterate over.
-func (c *Config) ParsePoolRange() (net.IP, net.IP, error) {
+// ParsePoolRangeForSegment returns the start and end of a segment's
+// dynamic pool as 4-byte IPs, for the allocator to iterate over.
+func (c *Config) ParsePoolRangeForSegment(segmentID string) (net.IP, net.IP, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	start := net.ParseIP(c.PoolStart).To4()
-	end := net.ParseIP(c.PoolEnd).To4()
-	if start == nil || end == nil {
-		return nil, nil, fmt.Errorf("invalid pool range %q - %q", c.PoolStart, c.PoolEnd)
+	for _, s := range c.LANSegments {
+		if s.ID != segmentID {
+			continue
+		}
+		start := net.ParseIP(s.PoolStart).To4()
+		end := net.ParseIP(s.PoolEnd).To4()
+		if start == nil || end == nil {
+			return nil, nil, fmt.Errorf("segment %q: invalid pool range %q - %q", s.Name, s.PoolStart, s.PoolEnd)
+		}
+		return start, end, nil
 	}
-	return start, end, nil
+	return nil, nil, fmt.Errorf("segment %q not found", segmentID)
 }

@@ -151,7 +151,10 @@ func (s *Server) handleRecursive(msg []byte, q *question, clientAddr *net.UDPAdd
 }
 
 // lookupLocal checks manual DNS records first, then falls back to
-// DHCP-lease-derived hostnames under the configured local domain.
+// DHCP-lease-derived hostnames under whichever segment's local domain
+// suffix matches - segments can each have their own domain (e.g.
+// "lan" vs "iot.lan"), so this checks all of them rather than a single
+// global suffix.
 func (s *Server) lookupLocal(name string) (net.IP, bool) {
 	snap := s.cfg.Snapshot()
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
@@ -162,16 +165,19 @@ func (s *Server) lookupLocal(name string) (net.IP, bool) {
 		}
 	}
 
-	suffix := "." + strings.ToLower(snap.Domain)
-	if strings.HasSuffix(name, suffix) {
+	for _, seg := range snap.LANSegments {
+		suffix := "." + strings.ToLower(seg.Domain)
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
 		host := strings.TrimSuffix(name, suffix)
 		for _, l := range snap.Leases {
-			if strings.ToLower(l.Hostname) == host {
+			if l.SegmentID == seg.ID && strings.ToLower(l.Hostname) == host {
 				return net.ParseIP(l.IP), true
 			}
 		}
 		for _, r := range snap.Reservations {
-			if strings.ToLower(r.Hostname) == host {
+			if r.SegmentID == seg.ID && strings.ToLower(r.Hostname) == host {
 				return net.ParseIP(r.IP), true
 			}
 		}

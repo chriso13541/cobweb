@@ -52,8 +52,18 @@ func main() {
 	// whole process. The dashboard itself has to stay reachable no
 	// matter what these two are doing, since it's also how a person
 	// would go fix a bad interface name in the first place.
-	dhcpSrv := dhcp.New(cfg)
-	go runForever("dhcp", dhcpSrv.Run)
+	//
+	// One DHCP listener runs per configured LAN segment (each VLAN
+	// gets its own, bound to its own interface) - only DNS stays a
+	// single shared listener, since one resolver can already answer
+	// queries from every segment (see the design note in dnsserver's
+	// package doc).
+	startupSnap := cfg.Snapshot()
+	for _, seg := range startupSnap.LANSegments {
+		seg := seg // capture for the closure
+		dhcpSrv := dhcp.New(cfg, seg.ID)
+		go runForever("dhcp["+seg.Name+"]", dhcpSrv.Run)
+	}
 
 	dnsSrv := dnsserver.New(cfg)
 	go runForever("dns", dnsSrv.Run)
@@ -63,9 +73,12 @@ func main() {
 		log.Fatalf("failed to initialize web server: %v", err)
 	}
 
-	snap := cfg.Snapshot()
-	log.Printf("cobweb: dashboard listening on %s (wan=%s lan=%s)", snap.ListenAddr, snap.WANInterface, snap.LANInterface)
-	log.Fatal(http.ListenAndServe(snap.ListenAddr, webSrv.Routes()))
+	segNames := make([]string, len(startupSnap.LANSegments))
+	for i, seg := range startupSnap.LANSegments {
+		segNames[i] = seg.Name + "(" + seg.Interface + ")"
+	}
+	log.Printf("cobweb: dashboard listening on %s (wan=%s segments=%v)", startupSnap.ListenAddr, startupSnap.WANInterface, segNames)
+	log.Fatal(http.ListenAndServe(startupSnap.ListenAddr, webSrv.Routes()))
 }
 
 // runForever calls fn repeatedly, logging and backing off between

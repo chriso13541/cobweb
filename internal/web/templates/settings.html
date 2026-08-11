@@ -158,8 +158,8 @@
 
     <div class="section-label">Network &amp; DHCP</div>
     <div class="panel">
-      <h2>Core configuration</h2>
-      <p class="desc">Changes take effect on the next request - no restart needed.</p>
+      <h2>Global settings</h2>
+      <p class="desc">Applies across every LAN segment. Changes take effect on the next request - no restart needed.</p>
       <form method="post" action="/api/network/update">
         <div class="grid2">
           <div>
@@ -167,32 +167,8 @@
             <input type="text" name="wan_interface" value="{{.WANInterface}}">
           </div>
           <div>
-            <label>LAN interface</label>
-            <input type="text" name="lan_interface" value="{{.LANInterface}}">
-          </div>
-          <div>
-            <label>Gateway address (this box)</label>
-            <input type="text" name="lan_address" value="{{.LANAddress}}">
-          </div>
-          <div>
-            <label>Subnet mask</label>
-            <input type="text" name="subnet_mask" value="{{.SubnetMask}}">
-          </div>
-          <div>
-            <label>Pool start</label>
-            <input type="text" name="pool_start" value="{{.PoolStart}}">
-          </div>
-          <div>
-            <label>Pool end</label>
-            <input type="text" name="pool_end" value="{{.PoolEnd}}">
-          </div>
-          <div>
             <label>Lease duration (seconds)</label>
             <input type="number" name="lease_seconds" value="{{.LeaseSeconds}}">
-          </div>
-          <div>
-            <label>Local domain suffix</label>
-            <input type="text" name="domain" value="{{.Domain}}">
           </div>
         </div>
 
@@ -216,7 +192,54 @@
 
         <label>Upstream DNS servers (comma-separated, host:port) - used in forward mode, and as a fallback if recursive resolution fails</label>
         <input type="text" name="upstream_servers" value="{{join .UpstreamServers ", "}}">
-        <button type="submit">Save network settings</button>
+        <button type="submit">Save global settings</button>
+      </form>
+    </div>
+
+    <div class="section-label">LAN segments (VLANs)</div>
+    <div class="panel">
+      <h2>Routed networks</h2>
+      <p class="desc">Each segment gets its own DHCP listener bound to its own interface. Adding or removing a segment here needs a cobweb restart before its DHCP listener actually starts or stops - the interface itself (an 802.1q subinterface for a VLAN, e.g. enp1s0.20) needs to already exist at the OS level; cobweb doesn't create it for you.</p>
+      <table>
+        <thead><tr><th>Name</th><th>Interface</th><th>Address</th><th>Subnet</th><th>Pool</th><th>Domain</th><th></th></tr></thead>
+        <tbody>
+          {{if not .LANSegments}}
+            <tr><td colspan="7" class="empty">No segments configured.</td></tr>
+          {{else}}
+            {{range .LANSegments}}
+            <tr>
+              <td>{{.Name}}</td>
+              <td>{{.Interface}}</td>
+              <td>{{.Address}}</td>
+              <td>{{.SubnetMask}}</td>
+              <td>{{.PoolStart}} – {{.PoolEnd}}</td>
+              <td>{{.Domain}}</td>
+              <td>
+                <form method="post" action="/api/segments/remove" style="margin:0;">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button type="submit" class="danger">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          {{end}}
+        </tbody>
+      </table>
+      <form method="post" action="/api/segments/add" style="margin-top:16px;">
+        <div class="grid3">
+          <div><label>Name</label><input type="text" name="name" placeholder="IoT"></div>
+          <div><label>Interface</label><input type="text" name="interface" placeholder="enp1s0.20"></div>
+          <div><label>Gateway address</label><input type="text" name="address" placeholder="192.168.20.1"></div>
+          <div></div>
+        </div>
+        <div class="grid3">
+          <div><label>Subnet mask</label><input type="text" name="subnet_mask" placeholder="255.255.255.0"></div>
+          <div><label>Pool start</label><input type="text" name="pool_start" placeholder="192.168.20.10"></div>
+          <div><label>Pool end</label><input type="text" name="pool_end" placeholder="192.168.20.254"></div>
+          <div style="padding-top:22px;"><button type="submit">Add segment</button></div>
+        </div>
+        <label>Local domain suffix</label>
+        <input type="text" name="domain" placeholder="lan">
       </form>
     </div>
 
@@ -225,16 +248,17 @@
       <h2>DHCP reservations</h2>
       <p class="desc">A MAC address here always gets the same IP, permanently, regardless of the dynamic pool.</p>
       <table>
-        <thead><tr><th>Hostname</th><th>MAC</th><th>IP</th><th></th></tr></thead>
+        <thead><tr><th>Hostname</th><th>MAC</th><th>IP</th><th>Segment</th><th></th></tr></thead>
         <tbody>
           {{if not .Reservations}}
-            <tr><td colspan="4" class="empty">No reservations yet.</td></tr>
+            <tr><td colspan="5" class="empty">No reservations yet.</td></tr>
           {{else}}
             {{range .Reservations}}
             <tr>
               <td>{{.Hostname}}</td>
               <td>{{.MAC}}</td>
               <td>{{.IP}}</td>
+              <td>{{segmentName $.LANSegments .SegmentID}}</td>
               <td>
                 <form method="post" action="/api/reservations/remove" style="margin:0;">
                   <input type="hidden" name="mac" value="{{.MAC}}">
@@ -253,6 +277,12 @@
           <div><label>IP address</label><input type="text" name="ip" placeholder="192.168.2.100"></div>
           <div style="padding-top:22px;"><button type="submit">Add</button></div>
         </div>
+        <label>Segment</label>
+        <select name="segment_id">
+          {{range .LANSegments}}
+            <option value="{{.ID}}">{{.Name}} ({{.Interface}})</option>
+          {{end}}
+        </select>
       </form>
     </div>
 

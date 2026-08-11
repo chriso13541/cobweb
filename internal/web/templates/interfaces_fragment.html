@@ -12,26 +12,7 @@
     <div class="stat-block"><div class="k">Rx</div><div class="v">{{.WANRx}}</div></div>
     <div class="stat-block"><div class="k">Tx</div><div class="v">{{.WANTx}}</div></div>
   </div>
-</div>
-<div class="panel">
-  <div class="iface-name">{{.LAN.Name}}</div>
-  <div class="iface-role">LAN — internal server network</div>
-  {{if .LAN.Up}}
-    <span class="badge ok"><span class="dot pulse"></span> up · {{.LAN.Speed}}</span>
-  {{else}}
-    <span class="badge off"><span class="dot"></span> down</span>
-  {{end}}
-  <div class="iface-stats">
-    <div class="stat-block"><div class="k">Address</div><div class="v">{{if .LAN.Addr}}{{.LAN.Addr}}{{else}}—{{end}}</div></div>
-    <div class="stat-block"><div class="k">Rx</div><div class="v">{{.LANRx}}</div></div>
-    <div class="stat-block"><div class="k">Tx</div><div class="v">{{.LANTx}}</div></div>
-  </div>
   <div class="service-row">
-    {{if .DHCPUp}}
-      <span class="badge ok" title="DHCP server running"><span class="dot"></span> DHCP</span>
-    {{else}}
-      <span class="badge danger-badge" title="{{.DHCPErr}}"><span class="dot"></span> DHCP down</span>
-    {{end}}
     {{if .DNSUp}}
       <span class="badge ok" title="DNS server running"><span class="dot"></span> DNS</span>
     {{else}}
@@ -39,4 +20,27 @@
     {{end}}
   </div>
 </div>
+{{range .Segments}}
+<div class="panel">
+  <div class="iface-name">{{.Iface.Name}}</div>
+  <div class="iface-role">{{.Name}}</div>
+  {{if .Iface.Up}}
+    <span class="badge ok"><span class="dot pulse"></span> up · {{.Iface.Speed}}</span>
+  {{else}}
+    <span class="badge off"><span class="dot"></span> down</span>
+  {{end}}
+  <div class="iface-stats">
+    <div class="stat-block"><div class="k">Address</div><div class="v">{{if .Iface.Addr}}{{.Iface.Addr}}{{else}}—{{end}}</div></div>
+    <div class="stat-block"><div class="k">Rx</div><div class="v">{{.Rx}}</div></div>
+    <div class="stat-block"><div class="k">Tx</div><div class="v">{{.Tx}}</div></div>
+  </div>
+  <div class="service-row">
+    {{if .DHCPUp}}
+      <span class="badge ok" title="DHCP server running"><span class="dot"></span> DHCP</span>
+    {{else}}
+      <span class="badge danger-badge" title="{{.DHCPErr}}"><span class="dot"></span> DHCP down</span>
+    {{end}}
+  </div>
+</div>
+{{end}}
 {{end}}

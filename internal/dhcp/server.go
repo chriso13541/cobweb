@@ -3,6 +3,12 @@
 // reservations by MAC address, and a dynamic pool for everything else.
 // It talks directly to the UDP socket rather than wrapping an external
 // daemon, so all of its behavior is driven by cobweb's own config file.
+//
+// One Server instance serves exactly one LAN segment (one VLAN, one
+// subnet, one pool) - a box with multiple segments runs multiple
+// Server instances, each bound to its own interface via
+// SO_BINDTODEVICE, same as the single-LAN case just replicated per
+// segment. They all share the same underlying config/lease store.
 package dhcp
 
 import (
@@ -10,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"syscall"
 	"time"
 
@@ -17,38 +24,67 @@ import (
 	"cobweb/internal/status"
 )
 
-// Server is a running DHCP server bound to one interface's broadcast
+// Server is a running DHCP server bound to one LAN segment's broadcast
 // domain.
 type Server struct {
-	cfg  *config.Config
-	conn *net.UDPConn
+	cfg       *config.Config
+	segmentID string
+	conn      *net.UDPConn
 }
 
-// New creates a DHCP server. It does not start listening until Run is
-// called.
-func New(cfg *config.Config) *Server {
-	return &Server{cfg: cfg}
+// New creates a DHCP server for one specific LAN segment. It does not
+// start listening until Run is called.
+func New(cfg *config.Config, segmentID string) *Server {
+	return &Server{cfg: cfg, segmentID: segmentID}
 }
 
-// Run binds to UDP :67 and serves requests until the process exits or
-// an unrecoverable socket error occurs. Requires root (or
-// CAP_NET_BIND_SERVICE) since port 67 is a privileged port.
+// segment looks up this server's current segment definition fresh from
+// config every time it's needed, same "always read live" pattern used
+// throughout cobweb - so changing a pool range or address in Settings
+// takes effect without a restart. If the segment has been deleted
+// since Run started, this returns an error; callers should treat that
+// as "nothing to do right now" rather than crash.
+func (s *Server) segment() (config.LANSegment, error) {
+	seg, ok := s.cfg.SegmentByID(s.segmentID)
+	if !ok {
+		return config.LANSegment{}, fmt.Errorf("segment %s no longer exists", s.segmentID)
+	}
+	return seg, nil
+}
+
+// Run binds to UDP :67 on this segment's interface and serves requests
+// until the process exits or an unrecoverable socket error occurs.
+// Requires root (or CAP_NET_BIND_SERVICE) since port 67 is privileged.
 func (s *Server) Run() error {
-	addr := &net.UDPAddr{Port: 67, IP: net.IPv4zero}
-	conn, err := net.ListenUDP("udp4", addr)
+	seg, err := s.segment()
 	if err != nil {
-		status.SetDHCP(false, err)
-		return fmt.Errorf("dhcp: listen: %w", err)
+		status.SetDHCPSegment(s.segmentID, "", false, err)
+		return fmt.Errorf("dhcp: %w", err)
+	}
+
+	// A box with multiple segments runs one of these Servers per
+	// segment, all wanting port 67. net.ListenUDP alone would collide:
+	// its bind() happens on the wildcard address before SO_BINDTODEVICE
+	// gets a chance to scope anything, so a second segment's listener
+	// would fail with "address already in use" even though it's meant
+	// to end up on a completely different interface. SO_REUSEPORT has
+	// to be set *before* bind to avoid that, which net.ListenUDP's
+	// convenience wrapper doesn't allow - so this constructs the
+	// socket by hand instead.
+	conn, err := listenUDPReusePort(67)
+	if err != nil {
+		status.SetDHCPSegment(s.segmentID, seg.Name, false, err)
+		return fmt.Errorf("dhcp[%s]: listen: %w", seg.Name, err)
 	}
 	s.conn = conn
 	defer conn.Close()
 
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
-		return fmt.Errorf("dhcp: syscall conn: %w", err)
+		return fmt.Errorf("dhcp[%s]: syscall conn: %w", seg.Name, err)
 	}
 
-	lanIf := s.cfg.Snapshot().LANInterface
+	lanIf := seg.Interface
 	var sockErr error
 	if err := rawConn.Control(func(fd uintptr) {
 		// Replies to clients that don't have an IP yet must go out as
@@ -58,30 +94,29 @@ func (s *Server) Run() error {
 		if sockErr != nil {
 			return
 		}
-		// This box has two interfaces (WAN + LAN). Without binding the
-		// socket to a specific device, the kernel has no unambiguous
-		// route for a broadcast destination and replies can silently
-		// go out the wrong interface (or get dropped), which is why
-		// clients would see occasional OFFERs but rarely complete the
-		// handshake. Binding to the LAN interface makes sure every
-		// send/receive on this socket only ever happens there.
+		// Scopes this specific socket to this segment's own interface,
+		// so with SO_REUSEPORT already letting multiple segments share
+		// port 67, each one still only ever sends/receives on its own
+		// interface - no cross-segment traffic possible even though
+		// they're all bound to the "same" address:port at the socket
+		// level.
 		sockErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, lanIf)
 	}); err != nil {
-		return fmt.Errorf("dhcp: control: %w", err)
+		return fmt.Errorf("dhcp[%s]: control: %w", seg.Name, err)
 	}
 	if sockErr != nil {
-		status.SetDHCP(false, sockErr)
-		return fmt.Errorf("dhcp: socket setup (SO_BROADCAST/SO_BINDTODEVICE on %s): %w", lanIf, sockErr)
+		status.SetDHCPSegment(s.segmentID, seg.Name, false, sockErr)
+		return fmt.Errorf("dhcp[%s]: socket setup (SO_BROADCAST/SO_BINDTODEVICE on %s): %w", seg.Name, lanIf, sockErr)
 	}
 
-	status.SetDHCP(true, nil)
-	log.Printf("dhcp: listening on :67 (bound to %s)", lanIf)
+	status.SetDHCPSegment(s.segmentID, seg.Name, true, nil)
+	log.Printf("dhcp[%s]: listening on :67 (bound to %s)", seg.Name, lanIf)
 
 	buf := make([]byte, 1500)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			log.Printf("dhcp: read error: %v", err)
+			log.Printf("dhcp[%s]: read error: %v", seg.Name, err)
 			continue
 		}
 		pkt, err := ParsePacket(buf[:n])
@@ -92,6 +127,60 @@ func (s *Server) Run() error {
 		}
 		s.handle(pkt)
 	}
+}
+
+// SO_REUSEPORT isn't exposed by Go's standard syscall package on this
+// platform, so it's defined here directly - this is the stable Linux
+// kernel ABI value (asm-generic/socket.h), not something that varies
+// or changes between kernel versions.
+const soReusePort = 0xf
+
+// listenUDPReusePort creates a UDP socket bound to 0.0.0.0:port with
+// SO_REUSEPORT set before bind - net.ListenUDP can't do this itself,
+// since by the time it hands back a *net.UDPConn, bind() has already
+// happened with no chance to set that option first. This is what lets
+// multiple LAN segments' DHCP servers all claim port 67 without
+// colliding, each later scoped to its own interface via
+// SO_BINDTODEVICE (set separately, after this returns).
+func listenUDPReusePort(port int) (*net.UDPConn, error) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	if err != nil {
+		return nil, fmt.Errorf("socket: %w", err)
+	}
+
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("SO_REUSEADDR: %w", err)
+	}
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, soReusePort, 1); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("SO_REUSEPORT: %w", err)
+	}
+
+	sa := &syscall.SockaddrInet4{Port: port} // Addr left zero: 0.0.0.0
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("bind :%d: %w", port, err)
+	}
+
+	// Hand the raw fd to the standard library as a *os.File, then let
+	// net wrap it as a proper *net.UDPConn - this gives back the same
+	// type Run() already knows how to use (ReadFromUDP, WriteToUDP,
+	// SyscallConn for the SO_BROADCAST/SO_BINDTODEVICE calls that
+	// follow), it's just constructed differently underneath.
+	file := os.NewFile(uintptr(fd), fmt.Sprintf("dhcp-udp-%d", port))
+	defer file.Close() // FilePacketConn dup()s the fd, so closing our copy here is correct and expected
+
+	pc, err := net.FilePacketConn(file)
+	if err != nil {
+		return nil, fmt.Errorf("FilePacketConn: %w", err)
+	}
+	conn, ok := pc.(*net.UDPConn)
+	if !ok {
+		pc.Close()
+		return nil, fmt.Errorf("unexpected packet conn type %T", pc)
+	}
+	return conn, nil
 }
 
 func (s *Server) handle(pkt *Packet) {
@@ -114,7 +203,11 @@ func (s *Server) handleDiscover(pkt *Packet) {
 		return
 	}
 
-	reply := s.buildOfferOrACK(pkt, ip, Offer)
+	reply, err := s.buildOfferOrACK(pkt, ip, Offer)
+	if err != nil {
+		log.Printf("dhcp: %v", err)
+		return
+	}
 	s.send(reply)
 	log.Printf("dhcp: OFFER %s -> %s", mac, ip)
 }
@@ -135,43 +228,56 @@ func (s *Server) handleRequest(pkt *Packet) {
 	ip, err := s.allocate(mac, pkt.Hostname, wantIP)
 	if err != nil {
 		log.Printf("dhcp: NAK for %s: %v", mac, err)
+		serverID, sErr := s.serverIP()
+		if sErr != nil {
+			return
+		}
 		nak := BuildReply(pkt, ReplyOpts{
 			MessageType: NAK,
-			ServerID:    s.serverIP(),
+			ServerID:    serverID,
 		})
 		s.send(nak)
 		return
 	}
 
-	reply := s.buildOfferOrACK(pkt, ip, ACK)
+	reply, err := s.buildOfferOrACK(pkt, ip, ACK)
+	if err != nil {
+		log.Printf("dhcp: %v", err)
+		return
+	}
 	s.send(reply)
 
 	hostname := pkt.Hostname
 	if hostname == "" {
 		hostname = "(unknown)"
 	}
-	expires := time.Now().Add(time.Duration(s.cfg.LeaseSeconds) * time.Second).Unix()
+	expires := time.Now().Add(time.Duration(s.cfg.Snapshot().LeaseSeconds) * time.Second).Unix()
 	if err := s.cfg.UpsertLease(config.Lease{
 		MAC:       mac,
 		IP:        ip.String(),
 		Hostname:  hostname,
 		ExpiresAt: expires,
+		SegmentID: s.segmentID,
 	}); err != nil {
 		log.Printf("dhcp: failed to persist lease for %s: %v", mac, err)
 	}
 	log.Printf("dhcp: ACK %s -> %s (%s)", mac, ip, hostname)
 }
 
-// allocate returns the IP that should be assigned to mac: a static
-// reservation if one exists, its existing active lease if it still has
-// one, the specifically requested IP if that's free, or the next free
-// address in the pool.
+// allocate returns the IP that should be assigned to mac, on this
+// server's own segment: a static reservation if one exists *for this
+// segment* (a reservation tagged for a different segment is ignored
+// here - a device showing up on the wrong VLAN port shouldn't get
+// handed an IP that belongs to a different subnet), its existing
+// active lease on this segment if it still has one, the specifically
+// requested IP if that's free and in this segment's pool, or the next
+// free address in this segment's pool.
 func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error) {
-	if r, ok := s.cfg.ReservationForMAC(mac); ok {
+	if r, ok := s.cfg.ReservationForMAC(mac); ok && r.SegmentID == s.segmentID {
 		return net.ParseIP(r.IP), nil
 	}
 
-	if l, ok := s.cfg.LeaseForMAC(mac); ok {
+	if l, ok := s.cfg.LeaseForMAC(mac); ok && l.SegmentID == s.segmentID {
 		if time.Now().Unix() < l.ExpiresAt || requested == nil || requested.String() == l.IP {
 			return net.ParseIP(l.IP), nil
 		}
@@ -181,13 +287,17 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 		return requested, nil
 	}
 
-	start, end, err := s.cfg.ParsePoolRange()
+	start, end, err := s.cfg.ParsePoolRangeForSegment(s.segmentID)
+	if err != nil {
+		return nil, err
+	}
+	seg, err := s.segment()
 	if err != nil {
 		return nil, err
 	}
 	for ip := cloneIP(start); ipLTE(ip, end); ip = nextIP(ip) {
 		candidate := ip.String()
-		if candidate == s.cfg.LANAddress {
+		if candidate == seg.Address {
 			continue // never hand out the gateway's own address
 		}
 		if !s.cfg.IPInUse(candidate, mac) {
@@ -198,38 +308,54 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 }
 
 func (s *Server) inPool(ip net.IP) bool {
-	start, end, err := s.cfg.ParsePoolRange()
+	start, end, err := s.cfg.ParsePoolRangeForSegment(s.segmentID)
 	if err != nil {
 		return false
 	}
 	return ipLTE(start, ip) && ipLTE(ip, end)
 }
 
-func (s *Server) buildOfferOrACK(req *Packet, ip net.IP, mt MessageType) []byte {
-	snap := s.cfg.Snapshot()
+func (s *Server) buildOfferOrACK(req *Packet, ip net.IP, mt MessageType) ([]byte, error) {
+	seg, err := s.segment()
+	if err != nil {
+		return nil, err
+	}
+	serverID, err := s.serverIP()
+	if err != nil {
+		return nil, err
+	}
 	return BuildReply(req, ReplyOpts{
 		MessageType: mt,
 		YourIP:      ip,
-		ServerID:    s.serverIP(),
-		SubnetMask:  net.ParseIP(snap.SubnetMask),
-		Router:      net.ParseIP(snap.LANAddress),
-		DNSServer:   net.ParseIP(snap.LANAddress), // cobweb runs its own resolver
-		LeaseTime:   uint32(snap.LeaseSeconds),
-	})
+		ServerID:    serverID,
+		SubnetMask:  net.ParseIP(seg.SubnetMask),
+		Router:      net.ParseIP(seg.Address),
+		DNSServer:   net.ParseIP(seg.Address), // cobweb runs one shared resolver, reachable via every segment's own gateway
+		LeaseTime:   uint32(s.cfg.Snapshot().LeaseSeconds),
+	}), nil
 }
 
-func (s *Server) serverIP() net.IP {
-	return net.ParseIP(s.cfg.Snapshot().LANAddress)
+func (s *Server) serverIP() (net.IP, error) {
+	seg, err := s.segment()
+	if err != nil {
+		return nil, err
+	}
+	return net.ParseIP(seg.Address), nil
 }
 
 // send broadcasts the reply. Home-network DHCP clients before they have
-// an address can only be reached via broadcast. It targets the LAN
-// subnet's own directed broadcast address (e.g. 192.168.2.255) rather
-// than the global 255.255.255.255 - combined with SO_BINDTODEVICE in
-// Run, this guarantees the reply goes out the LAN interface only.
+// an address can only be reached via broadcast. It targets this
+// segment's own directed broadcast address (e.g. 192.168.20.255)
+// rather than the global 255.255.255.255 - combined with
+// SO_BINDTODEVICE in Run, this guarantees the reply goes out this
+// segment's interface only.
 func (s *Server) send(b []byte) {
-	snap := s.cfg.Snapshot()
-	bcast := directedBroadcast(net.ParseIP(snap.LANAddress), net.ParseIP(snap.SubnetMask))
+	seg, err := s.segment()
+	if err != nil {
+		log.Printf("dhcp: send: %v", err)
+		return
+	}
+	bcast := directedBroadcast(net.ParseIP(seg.Address), net.ParseIP(seg.SubnetMask))
 	dst := &net.UDPAddr{IP: bcast, Port: 68}
 	if _, err := s.conn.WriteToUDP(b, dst); err != nil {
 		log.Printf("dhcp: send error: %v", err)

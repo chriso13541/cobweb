@@ -96,11 +96,10 @@
 
   .iface-grid{
     display:grid;
-    grid-template-columns:1fr 1fr;
+    grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));
     gap:16px;
     margin-bottom:32px;
   }
-  @media (max-width:720px){ .iface-grid{ grid-template-columns:1fr; } }
 
   .perf-grid{
     display:grid;

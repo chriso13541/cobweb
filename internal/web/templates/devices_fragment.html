@@ -37,6 +37,7 @@
       </span>
     </div>
     <div class="device-card-row"><span class="k">Lease</span><span class="v">{{.ExpiresAbsolute}}</span></div>
+    <div class="device-card-row"><span class="k">Segment</span><span class="v">{{.Segment}}</span></div>
 
     <div class="device-card-actions">
       {{if not .Reserved}}
@@ -45,6 +46,7 @@
           <input type="hidden" name="hostname" value="{{.Hostname}}">
           <input type="hidden" name="mac" value="{{.MAC}}">
           <input type="hidden" name="ip" value="{{.IP}}">
+          <input type="hidden" name="segment_id" value="{{.SegmentID}}">
           <button type="submit" class="btn-small">Pin as static reservation</button>
         </form>
         <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML"

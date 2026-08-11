@@ -136,17 +136,34 @@ You generally shouldn't need to hand-edit it — the dashboard's
 ```json
 {
   "wan_interface": "wlp2s0",
-  "lan_interface": "enp1s0",
-  "lan_address": "192.168.2.1",
-  "subnet_mask": "255.255.255.0",
-  "pool_start": "192.168.2.10",
-  "pool_end": "192.168.2.254",
+  "lan_segments": [
+    {
+      "id": "seg-a1b2c3d4e5f6",
+      "name": "Trusted",
+      "interface": "enp1s0",
+      "address": "192.168.2.1",
+      "subnet_mask": "255.255.255.0",
+      "pool_start": "192.168.2.10",
+      "pool_end": "192.168.2.254",
+      "domain": "lan"
+    },
+    {
+      "id": "seg-f6e5d4c3b2a1",
+      "name": "IoT",
+      "interface": "enp1s0.20",
+      "address": "192.168.20.1",
+      "subnet_mask": "255.255.255.0",
+      "pool_start": "192.168.20.10",
+      "pool_end": "192.168.20.254",
+      "domain": "iot.lan"
+    }
+  ],
   "lease_seconds": 86400,
-  "domain": "lan",
+  "dns_mode": "forward",
   "upstream_servers": ["1.1.1.1:53", "9.9.9.9:53"],
   "listen_addr": "0.0.0.0:8070",
   "reservations": [
-    {"mac": "08:62:66:a1:25:44", "ip": "192.168.2.10", "hostname": "stronghold"}
+    {"mac": "08:62:66:a1:25:44", "ip": "192.168.2.10", "hostname": "stronghold", "segment_id": "seg-a1b2c3d4e5f6"}
   ],
   "dns_records": [
     {"name": "nas.lan", "ip": "192.168.2.10"}
@@ -155,10 +172,86 @@ You generally shouldn't need to hand-edit it — the dashboard's
 }
 ```
 
+Each `id` is generated once and never changes, even if you rename a
+segment or change its interface/pool later - reservations and leases
+reference it, not the name, so renaming a segment never orphans
+anything. An older single-LAN config (from before this shape existed)
+is migrated into a one-segment list automatically the first time it's
+loaded; nothing needs to be re-entered.
+
 `leases` is maintained automatically by the DHCP server — dynamic
 clients show up here as they get addresses, and it's what survives a
 restart so devices don't lose their addresses just because cobweb
 restarted.
+
+## VLANs / multiple LAN segments
+
+cobweb runs one DHCP listener per configured LAN segment, each bound
+to its own interface. DNS stays a single shared resolver regardless of
+how many segments exist - one UDP socket on `0.0.0.0:53` already
+answers queries from every segment correctly, since replies route back
+out whichever interface the kernel's own routing table says matches
+the destination.
+
+Getting an actual VLAN trunk working is three separate layers, and
+cobweb only owns the last one:
+
+**1. Switch side** — configure the port facing `cobweb` as a trunk
+carrying whichever VLAN IDs you want routed (e.g. VLAN 10 and 20),
+and configure your other switch ports as access ports on the
+appropriate VLAN. This is switch-specific; consult its own
+documentation.
+
+**2. OS side** — create an 802.1q subinterface per VLAN with netplan:
+
+```yaml
+# /etc/netplan/02-vlans.yaml
+network:
+  version: 2
+  vlans:
+    enp1s0.20:
+      id: 20
+      link: enp1s0
+      addresses: [192.168.20.1/24]
+```
+
+```bash
+sudo netplan apply
+ip link show enp1s0.20   # confirm it came up
+```
+
+Repeat per VLAN. The base interface (`enp1s0` here) stays as your
+existing "Trusted" segment; each VLAN gets its own `enp1s0.<id>`
+subinterface.
+
+**3. nftables side** — since VLANs are "fully routed" by default (no
+isolation between them, just forwarding + WAN masquerade), the
+existing ruleset barely changes: `forward` just needs to accept
+traffic between *any* LAN-tagged interface, not only the one it
+already knew about:
+
+```
+table inet filter {
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        ct state established,related accept
+        iifname { "enp1s0", "enp1s0.20" } oifname $WAN_IF accept
+        iifname { "enp1s0", "enp1s0.20" } oifname { "enp1s0", "enp1s0.20" } accept
+    }
+}
+```
+
+Add every VLAN interface to both `{ }` sets as you create more
+segments. If you want isolation between specific segments later
+instead of full routing, that's a different (currently manual) ruleset
+- ask if you want that built into the dashboard instead of hand-edited.
+
+**4. cobweb side** — add the segment via Settings → LAN segments
+(Name, Interface, Address, Subnet, Pool, Domain), then restart cobweb.
+Adding/removing a segment through the dashboard updates the config
+immediately, but the DHCP listener goroutines are only started at
+boot - a restart is what actually brings a new segment's listener up
+or tears a removed one down.
 
 ## Project layout
 
