@@ -167,7 +167,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if err := s.tmpl.ExecuteTemplate(w, "dashboard.html", nil); err != nil {
+	data := struct {
+		LANSegments []config.LANSegment
+	}{LANSegments: s.cfg.Snapshot().LANSegments}
+	if err := s.tmpl.ExecuteTemplate(w, "dashboard.html", data); err != nil {
 		log.Printf("render dashboard: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
@@ -313,6 +316,17 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			Segment:         segmentDisplayName(snap.LANSegments, l.SegmentID),
 			SegmentID:       l.SegmentID,
 		})
+	}
+
+	segmentFilter := strings.TrimSpace(r.URL.Query().Get("segment"))
+	if segmentFilter != "" && segmentFilter != "all" {
+		filtered := rows[:0:0]
+		for _, row := range rows {
+			if row.SegmentID == segmentFilter {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
 	}
 
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))

@@ -309,8 +309,18 @@
     <div class="devices-panel">
       <div class="devices-header">
         <h2>Connected devices</h2>
-        <input type="text" id="device-search" class="search-input" placeholder="Search hostname, IP, or MAC…"
-               oninput="onSearchInput()">
+        <div style="display:flex; gap:10px; align-items:center;">
+          {{if gt (len .LANSegments) 1}}
+          <select id="segment-filter" class="search-input" onchange="onSegmentFilterChange()" style="width:auto;">
+            <option value="all">All devices</option>
+            {{range .LANSegments}}
+              <option value="{{.ID}}">{{.Name}}</option>
+            {{end}}
+          </select>
+          {{end}}
+          <input type="text" id="device-search" class="search-input" placeholder="Search hostname, IP, or MAC…"
+                 oninput="onSearchInput()">
+        </div>
       </div>
       <div class="devices-toolbar">
         <span class="toolbar-label">Sort by</span>
@@ -380,7 +390,9 @@
 
   function refreshDevices(){
     const q = document.getElementById('device-search').value;
-    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, editing: Array.from(editingRows).join(',') });
+    const segmentEl = document.getElementById('segment-filter');
+    const segment = segmentEl ? segmentEl.value : 'all'; // dropdown only renders when there's more than one segment
+    const params = new URLSearchParams({ q: q, sort: sortField, dir: sortDir, editing: Array.from(editingRows).join(','), segment: segment });
 
     invalidatePendingDevicesFetch();
     const seq = requestSeq;
@@ -420,6 +432,10 @@
   function onSearchInput(){
     clearTimeout(searchTimer);
     searchTimer = setTimeout(refreshDevices, 300);
+  }
+
+  function onSegmentFilterChange(){
+    refreshDevices();
   }
 
   // Switches a card's hostname into edit mode: marks it in
