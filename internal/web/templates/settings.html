@@ -73,6 +73,11 @@
   button:hover{ filter:brightness(1.08); }
   button.danger{ background:transparent; border-color:var(--danger-border); color:var(--danger); padding:6px 10px; font-size:12px; }
   button.danger:hover{ background:var(--danger-bg); }
+  .link-btn{
+    background:none; border:none; cursor:pointer; color:var(--accent);
+    font-family:var(--sans); font-size:12px; font-weight:600; padding:0; text-decoration:underline;
+  }
+  .link-btn:hover{ opacity:0.8; }
 
   table{ width:100%; border-collapse:collapse; margin-top:4px; }
   thead th{
@@ -216,9 +221,38 @@
               <td>{{.Domain}}</td>
               <td>{{if .DHCPDisabled}}Disabled{{else}}Enabled{{end}}</td>
               <td>
-                <form method="post" action="/api/segments/remove" style="margin:0;">
+                <button type="button" class="link-btn" onclick="toggleSegmentEdit('{{.ID}}')">Edit</button>
+                <form method="post" action="/api/segments/remove" style="display:inline; margin:0 0 0 10px;">
                   <input type="hidden" name="id" value="{{.ID}}">
                   <button type="submit" class="danger">Remove</button>
+                </form>
+              </td>
+            </tr>
+            <tr id="segment-edit-{{.ID}}" style="display:none;">
+              <td colspan="8" style="background:var(--panel-2); padding:16px 14px;">
+                <form method="post" action="/api/segments/update" style="margin:0;">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <div class="grid3">
+                    <div><label>Name</label><input type="text" name="name" value="{{.Name}}"></div>
+                    <div><label>Interface</label><input type="text" name="interface" value="{{.Interface}}"></div>
+                    <div><label>Gateway address</label><input type="text" name="address" value="{{.Address}}"></div>
+                    <div></div>
+                  </div>
+                  <div class="grid3">
+                    <div><label>Subnet mask</label><input type="text" name="subnet_mask" value="{{.SubnetMask}}"></div>
+                    <div><label>Pool start</label><input type="text" name="pool_start" value="{{.PoolStart}}"></div>
+                    <div><label>Pool end</label><input type="text" name="pool_end" value="{{.PoolEnd}}"></div>
+                    <div style="padding-top:22px;"><button type="submit">Save changes</button></div>
+                  </div>
+                  <label>Local domain suffix</label>
+                  <input type="text" name="domain" value="{{.Domain}}">
+                  <label class="mode-option" style="margin-top:4px;">
+                    <input type="checkbox" name="dhcp_disabled" value="1" {{if .DHCPDisabled}}checked{{end}} style="margin-top:2px; width:auto;">
+                    <div>
+                      <div class="mode-title">No DHCP on this segment</div>
+                      <div class="mode-desc">For a purely static-IP network - e.g. a switch management VLAN.</div>
+                    </div>
+                  </label>
                 </form>
               </td>
             </tr>
@@ -260,6 +294,11 @@
           field.style.opacity = opacity;
           field.querySelector('input').disabled = disabled;
         });
+      }
+
+      function toggleSegmentEdit(id){
+        var row = document.getElementById('segment-edit-' + id);
+        row.style.display = (row.style.display === 'none') ? 'table-row' : 'none';
       }
     </script>
 

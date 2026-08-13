@@ -78,6 +78,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
 	mux.HandleFunc("/api/segments/add", s.requireAuth(s.handleAddLANSegment))
+	mux.HandleFunc("/api/segments/update", s.requireAuth(s.handleUpdateLANSegment))
 	mux.HandleFunc("/api/segments/remove", s.requireAuth(s.handleRemoveLANSegment))
 	mux.HandleFunc("/api/account/update", s.requireAuth(s.handleAccountUpdate))
 
@@ -760,6 +761,54 @@ func (s *Server) handleRemoveLANSegment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.renderSettings(w, r, "", "Segment removed. Restart cobweb to stop its DHCP listener.")
+}
+
+// handleUpdateLANSegment edits an existing segment in place, keyed by
+// its immutable ID - deliberately separate from remove+re-add, since
+// re-adding always generates a fresh ID and would silently orphan any
+// reservation or lease still pointing at the old one. This is the
+// right way to fix something like "this segment's interface changed
+// from enp1s0 to enp1s0.10" without losing data tied to it.
+func (s *Server) handleUpdateLANSegment(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.FormValue("id"))
+	dhcpDisabled := r.FormValue("dhcp_disabled") != ""
+	seg := config.LANSegment{
+		Name:         strings.TrimSpace(r.FormValue("name")),
+		Interface:    strings.TrimSpace(r.FormValue("interface")),
+		Address:      strings.TrimSpace(r.FormValue("address")),
+		SubnetMask:   strings.TrimSpace(r.FormValue("subnet_mask")),
+		PoolStart:    strings.TrimSpace(r.FormValue("pool_start")),
+		PoolEnd:      strings.TrimSpace(r.FormValue("pool_end")),
+		Domain:       strings.TrimSpace(r.FormValue("domain")),
+		DHCPDisabled: dhcpDisabled,
+	}
+	if id == "" || seg.Name == "" || seg.Interface == "" || seg.Address == "" || seg.SubnetMask == "" {
+		http.Error(w, "name, interface, address, and subnet mask are required", http.StatusBadRequest)
+		return
+	}
+	if !dhcpDisabled && (seg.PoolStart == "" || seg.PoolEnd == "") {
+		http.Error(w, "pool start and end are required unless DHCP is disabled for this segment", http.StatusBadRequest)
+		return
+	}
+	if seg.PoolStart == "" {
+		seg.PoolStart = seg.Address
+	}
+	if seg.PoolEnd == "" {
+		seg.PoolEnd = seg.Address
+	}
+	if seg.Domain == "" {
+		seg.Domain = "lan"
+	}
+	if err := s.cfg.UpdateLANSegment(id, seg); err != nil {
+		log.Printf("update lan segment: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.renderSettings(w, r, "", "Segment updated. Restart cobweb for interface/DHCP changes to take effect.")
 }
 
 func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) {
