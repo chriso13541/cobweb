@@ -60,6 +60,10 @@ func main() {
 	// package doc).
 	startupSnap := cfg.Snapshot()
 	for _, seg := range startupSnap.LANSegments {
+		if seg.DHCPDisabled {
+			log.Printf("dhcp[%s]: DHCP disabled for this segment, not starting a listener", seg.Name)
+			continue
+		}
 		seg := seg // capture for the closure
 		dhcpSrv := dhcp.New(cfg, seg.ID)
 		go runForever("dhcp["+seg.Name+"]", dhcpSrv.Run)

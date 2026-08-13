@@ -35,7 +35,9 @@
     <div class="stat-block"><div class="k">Tx</div><div class="v">{{.Tx}}</div></div>
   </div>
   <div class="service-row">
-    {{if .DHCPUp}}
+    {{if .DHCPDisabled}}
+      <span class="badge off" title="DHCP intentionally disabled for this segment"><span class="dot"></span> DHCP disabled</span>
+    {{else if .DHCPUp}}
       <span class="badge ok" title="DHCP server running"><span class="dot"></span> DHCP</span>
     {{else}}
       <span class="badge danger-badge" title="{{.DHCPErr}}"><span class="dot"></span> DHCP down</span>

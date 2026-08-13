@@ -381,11 +381,12 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 // segmentPanel is one LAN segment's interface stats + DHCP status, for
 // the interfaces panel - one of these per configured VLAN.
 type segmentPanel struct {
-	Name    string
-	Iface   netstat.Interface
-	Rx, Tx  string
-	DHCPUp  bool
-	DHCPErr string
+	Name         string
+	Iface        netstat.Interface
+	Rx, Tx       string
+	DHCPUp       bool
+	DHCPErr      string
+	DHCPDisabled bool
 }
 
 func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request) {
@@ -409,12 +410,13 @@ func (s *Server) handleInterfacesFragment(w http.ResponseWriter, r *http.Request
 		}
 		dhcp := dhcpBySegment[seg.ID]
 		segments = append(segments, segmentPanel{
-			Name:    seg.Name,
-			Iface:   iface,
-			Rx:      netstat.HumanBytes(iface.RxBytes),
-			Tx:      netstat.HumanBytes(iface.TxBytes),
-			DHCPUp:  dhcp.Up,
-			DHCPErr: dhcp.LastErr,
+			Name:         seg.Name,
+			Iface:        iface,
+			Rx:           netstat.HumanBytes(iface.RxBytes),
+			Tx:           netstat.HumanBytes(iface.TxBytes),
+			DHCPUp:       dhcp.Up,
+			DHCPErr:      dhcp.LastErr,
+			DHCPDisabled: seg.DHCPDisabled,
 		})
 	}
 
@@ -706,18 +708,34 @@ func (s *Server) handleAddLANSegment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	dhcpDisabled := r.FormValue("dhcp_disabled") != ""
 	seg := config.LANSegment{
-		Name:       strings.TrimSpace(r.FormValue("name")),
-		Interface:  strings.TrimSpace(r.FormValue("interface")),
-		Address:    strings.TrimSpace(r.FormValue("address")),
-		SubnetMask: strings.TrimSpace(r.FormValue("subnet_mask")),
-		PoolStart:  strings.TrimSpace(r.FormValue("pool_start")),
-		PoolEnd:    strings.TrimSpace(r.FormValue("pool_end")),
-		Domain:     strings.TrimSpace(r.FormValue("domain")),
+		Name:         strings.TrimSpace(r.FormValue("name")),
+		Interface:    strings.TrimSpace(r.FormValue("interface")),
+		Address:      strings.TrimSpace(r.FormValue("address")),
+		SubnetMask:   strings.TrimSpace(r.FormValue("subnet_mask")),
+		PoolStart:    strings.TrimSpace(r.FormValue("pool_start")),
+		PoolEnd:      strings.TrimSpace(r.FormValue("pool_end")),
+		Domain:       strings.TrimSpace(r.FormValue("domain")),
+		DHCPDisabled: dhcpDisabled,
 	}
-	if seg.Name == "" || seg.Interface == "" || seg.Address == "" || seg.SubnetMask == "" || seg.PoolStart == "" || seg.PoolEnd == "" {
-		http.Error(w, "all segment fields are required", http.StatusBadRequest)
+	if seg.Name == "" || seg.Interface == "" || seg.Address == "" || seg.SubnetMask == "" {
+		http.Error(w, "name, interface, address, and subnet mask are required", http.StatusBadRequest)
 		return
+	}
+	if !dhcpDisabled && (seg.PoolStart == "" || seg.PoolEnd == "") {
+		http.Error(w, "pool start and end are required unless DHCP is disabled for this segment", http.StatusBadRequest)
+		return
+	}
+	// A DHCP-disabled segment (e.g. a switch management VLAN with only
+	// static IPs) has no meaningful pool - default it to the
+	// gateway's own address so nothing downstream ever sees an empty
+	// string, even though no DHCP listener will actually run for it.
+	if seg.PoolStart == "" {
+		seg.PoolStart = seg.Address
+	}
+	if seg.PoolEnd == "" {
+		seg.PoolEnd = seg.Address
 	}
 	if seg.Domain == "" {
 		seg.Domain = "lan"

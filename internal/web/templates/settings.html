@@ -201,10 +201,10 @@
       <h2>Routed networks</h2>
       <p class="desc">Each segment gets its own DHCP listener bound to its own interface. Adding or removing a segment here needs a cobweb restart before its DHCP listener actually starts or stops - the interface itself (an 802.1q subinterface for a VLAN, e.g. enp1s0.20) needs to already exist at the OS level; cobweb doesn't create it for you.</p>
       <table>
-        <thead><tr><th>Name</th><th>Interface</th><th>Address</th><th>Subnet</th><th>Pool</th><th>Domain</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Interface</th><th>Address</th><th>Subnet</th><th>Pool</th><th>Domain</th><th>DHCP</th><th></th></tr></thead>
         <tbody>
           {{if not .LANSegments}}
-            <tr><td colspan="7" class="empty">No segments configured.</td></tr>
+            <tr><td colspan="8" class="empty">No segments configured.</td></tr>
           {{else}}
             {{range .LANSegments}}
             <tr>
@@ -212,8 +212,9 @@
               <td>{{.Interface}}</td>
               <td>{{.Address}}</td>
               <td>{{.SubnetMask}}</td>
-              <td>{{.PoolStart}} – {{.PoolEnd}}</td>
+              <td>{{if .DHCPDisabled}}—{{else}}{{.PoolStart}} – {{.PoolEnd}}{{end}}</td>
               <td>{{.Domain}}</td>
+              <td>{{if .DHCPDisabled}}Disabled{{else}}Enabled{{end}}</td>
               <td>
                 <form method="post" action="/api/segments/remove" style="margin:0;">
                   <input type="hidden" name="id" value="{{.ID}}">
@@ -234,14 +235,33 @@
         </div>
         <div class="grid3">
           <div><label>Subnet mask</label><input type="text" name="subnet_mask" placeholder="255.255.255.0"></div>
-          <div><label>Pool start</label><input type="text" name="pool_start" placeholder="192.168.20.10"></div>
-          <div><label>Pool end</label><input type="text" name="pool_end" placeholder="192.168.20.254"></div>
+          <div id="segment-pool-start-field"><label>Pool start</label><input type="text" name="pool_start" placeholder="192.168.20.10"></div>
+          <div id="segment-pool-end-field"><label>Pool end</label><input type="text" name="pool_end" placeholder="192.168.20.254"></div>
           <div style="padding-top:22px;"><button type="submit">Add segment</button></div>
         </div>
         <label>Local domain suffix</label>
         <input type="text" name="domain" placeholder="lan">
+        <label class="mode-option" style="margin-top:4px;">
+          <input type="checkbox" name="dhcp_disabled" value="1" onchange="onDHCPDisabledToggle(this)" style="margin-top:2px; width:auto;">
+          <div>
+            <div class="mode-title">No DHCP on this segment</div>
+            <div class="mode-desc">For a purely static-IP network - e.g. a switch management VLAN where you assign addresses by hand and never expect a dynamic client. Rare; leave unchecked for a normal LAN/VLAN.</div>
+          </div>
+        </label>
       </form>
     </div>
+
+    <script>
+      function onDHCPDisabledToggle(checkbox){
+        var opacity = checkbox.checked ? '0.45' : '1';
+        var disabled = checkbox.checked;
+        ['segment-pool-start-field', 'segment-pool-end-field'].forEach(function(id){
+          var field = document.getElementById(id);
+          field.style.opacity = opacity;
+          field.querySelector('input').disabled = disabled;
+        });
+      }
+    </script>
 
     <div class="section-label">Static reservations</div>
     <div class="panel">

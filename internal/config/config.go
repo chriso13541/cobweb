@@ -31,6 +31,13 @@ type LANSegment struct {
 	PoolStart  string `json:"pool_start"`
 	PoolEnd    string `json:"pool_end"`
 	Domain     string `json:"domain"` // local DNS suffix for this segment, e.g. "lan"
+	// DHCPDisabled opts a segment OUT of DHCP - deliberately named for
+	// the rare case (most segments want DHCP) rather than
+	// DHCPEnabled, so the Go zero value (false) means "DHCP on" for
+	// every segment that predates this field, with no migration
+	// needed. Meant for a segment that's purely static IPs (e.g. a
+	// switch management VLAN) with no dynamic clients ever expected.
+	DHCPDisabled bool `json:"dhcp_disabled"`
 }
 
 // Reservation pins a specific MAC address to a specific IP address,
