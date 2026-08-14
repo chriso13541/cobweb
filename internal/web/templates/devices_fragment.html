@@ -1,7 +1,7 @@
 {{define "devices_fragment.html"}}
 {{if not .Rows}}
   <div class="empty-state">
-    {{if .Query}}No devices match "{{.Query}}".{{else}}No devices seen yet. They'll appear here once they request an address.{{end}}
+    {{if .Query}}No devices match "{{.Query}}".{{else}}No devices seen yet. They'll appear here once they request an address, or as soon as cobweb exchanges any traffic with them.{{end}}
   </div>
 {{else}}
   {{range .Rows}}
@@ -31,6 +31,8 @@
           <span class="badge reserved"><span class="dot"></span> reserved</span>
         {{else if eq .Status "expired"}}
           <span class="badge warn"><span class="dot"></span> expired</span>
+        {{else if eq .Status "discovered"}}
+          <span class="badge off"><span class="dot"></span> discovered</span>
         {{else}}
           <span class="badge ok"><span class="dot"></span> {{.TimeLeft}}</span>
         {{end}}
@@ -49,11 +51,13 @@
           <input type="hidden" name="segment_id" value="{{.SegmentID}}">
           <button type="submit" class="btn-small">Pin as static reservation</button>
         </form>
+        {{if not .Discovered}}
         <form hx-post="/api/leases/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
               hx-vals='js:{editing: Array.from(editingRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">
           <input type="hidden" name="mac" value="{{.MAC}}">
           <button type="submit" class="btn-small btn-small-danger">Remove entry</button>
         </form>
+        {{end}}
       {{else}}
         <form hx-post="/api/reservations/quickremove" hx-target="#device-rows" hx-swap="innerHTML"
               hx-vals='js:{editing: Array.from(editingRows).join(",")}' onsubmit="invalidatePendingDevicesFetch()" style="margin:0;">

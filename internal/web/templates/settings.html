@@ -204,7 +204,7 @@
     <div class="section-label">LAN segments (VLANs)</div>
     <div class="panel">
       <h2>Routed networks</h2>
-      <p class="desc">Each segment gets its own DHCP listener bound to its own interface. Adding or removing a segment here needs a cobweb restart before its DHCP listener actually starts or stops - the interface itself (an 802.1q subinterface for a VLAN, e.g. enp1s0.20) needs to already exist at the OS level; cobweb doesn't create it for you.</p>
+      <p class="desc">Each segment gets its own DHCP listener bound to its own interface. Adding or removing a segment here needs a cobweb restart before its DHCP listener actually starts or stops - the interface itself (an 802.1q subinterface for a VLAN, e.g. enp1s0.20) needs to already exist at the OS level; cobweb doesn't create it for you. If a device isn't showing up as expected, <a href="/diagnostics/arp" style="color:var(--accent);">check the raw ARP table</a> to see exactly what cobweb sees.</p>
       <table>
         <thead><tr><th>Name</th><th>Interface</th><th>Address</th><th>Subnet</th><th>Pool</th><th>Domain</th><th>DHCP</th><th></th></tr></thead>
         <tbody>

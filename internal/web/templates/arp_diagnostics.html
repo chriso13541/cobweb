@@ -1,0 +1,122 @@
+{{define "arp_diagnostics.html"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cobweb · ARP diagnostics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+{{template "theme_script" .}}
+<style>
+  {{template "theme_vars" .}}
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); }
+  .header{
+    border-bottom:1px solid var(--border);
+    padding:22px 32px;
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .mark{ color:var(--accent); font-family:var(--mono); font-size:20px; }
+  .brand h1{ margin:0; font-size:19px; font-weight:600; }
+  .brand .sub{ color:var(--text-faint); font-size:12.5px; font-family:var(--mono); }
+  .nav-link{
+    font-size:13.5px; font-weight:500; color:var(--text-dim); text-decoration:none;
+    padding:6px 12px; border:1px solid var(--border); border-radius:var(--radius);
+  }
+  .nav-link:hover{ color:var(--accent); border-color:var(--accent-dim); }
+
+  main{ padding:28px 32px 60px; max-width:900px; margin:0 auto; }
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px 22px; margin-bottom:24px;
+  }
+  .panel h2{ margin:0 0 4px; font-size:15px; font-weight:600; }
+  .panel .desc{ margin:0 0 14px; font-size:13px; color:var(--text-faint); line-height:1.5; }
+
+  table{ width:100%; border-collapse:collapse; margin-top:4px; }
+  thead th{
+    text-align:left; font-family:var(--mono); font-size:10.5px; letter-spacing:0.06em;
+    text-transform:uppercase; color:var(--text-faint); font-weight:500;
+    padding:0 10px 8px; border-bottom:1px solid var(--border);
+  }
+  tbody td{ padding:9px 10px; font-size:13px; border-bottom:1px solid var(--border); font-family:var(--mono); }
+  tbody tr:last-child td{ border-bottom:none; }
+  .empty{ color:var(--text-faint); font-style:italic; padding:14px 4px; font-size:13px; }
+
+  .badge{
+    display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11.5px;
+    padding:3px 8px; border-radius:99px; border:1px solid var(--border);
+  }
+  .badge.ok{ color:var(--accent); border-color:var(--accent-dim); }
+  .badge.warn{ color:var(--warn); border-color:var(--warn-border); }
+  .dot{ width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+  .code-list{ font-family:var(--mono); font-size:12.5px; color:var(--text); line-height:1.8; }
+  .flash-error{
+    background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger);
+    font-size:13px; padding:10px 12px; border-radius:var(--radius); margin-bottom:16px;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <span class="mark">◈</span>
+      <h1>cobweb</h1>
+      <span class="sub">ARP diagnostics</span>
+    </div>
+    <a href="/settings" class="nav-link">← Settings</a>
+  </div>
+
+  <main>
+    <div class="panel">
+      <h2>What this shows</h2>
+      <p class="desc">
+        The exact contents of the kernel's ARP table (/proc/net/arp) right now, and whether each entry's
+        interface matches a configured LAN segment. A device only shows up as "discovered" on the dashboard
+        if it appears below <em>and</em> its Interface column exactly matches one of your configured segments'
+        Interface field - a mismatch there (extra space, wrong name) is the most common reason something's missing.
+      </p>
+      <p class="desc" style="margin-bottom:0;"><strong>Currently configured segment interfaces:</strong></p>
+      <div class="code-list">
+        {{if not .ConfiguredIfaces}}(none configured){{end}}
+        {{range .ConfiguredIfaces}}{{.}}<br>{{end}}
+      </div>
+    </div>
+
+    {{if .ReadErr}}
+      <div class="flash-error">Failed to read /proc/net/arp: {{.ReadErr}}</div>
+    {{end}}
+
+    <div class="panel">
+      <h2>Raw ARP table</h2>
+      <table>
+        <thead><tr><th>IP</th><th>MAC</th><th>Interface</th><th>Match</th></tr></thead>
+        <tbody>
+          {{if not .Rows}}
+            <tr><td colspan="4" class="empty">No resolved ARP entries right now.</td></tr>
+          {{else}}
+            {{range .Rows}}
+            <tr>
+              <td>{{.IP}}</td>
+              <td>{{.MAC}}</td>
+              <td>{{.Interface}}</td>
+              <td>
+                {{if .Matched}}
+                  <span class="badge ok"><span class="dot"></span> {{.MatchedName}}</span>
+                {{else}}
+                  <span class="badge warn"><span class="dot"></span> no matching segment</span>
+                {{end}}
+              </td>
+            </tr>
+            {{end}}
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>
+{{end}}

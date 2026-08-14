@@ -65,6 +65,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("/", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("/settings", s.requireAuth(s.handleSettingsPage))
+	mux.HandleFunc("/diagnostics/arp", s.requireAuth(s.handleARPDiagnostics))
 	mux.HandleFunc("/fragments/devices", s.requireAuth(s.handleDevicesFragment))
 	mux.HandleFunc("/fragments/interfaces", s.requireAuth(s.handleInterfacesFragment))
 	mux.HandleFunc("/fragments/performance", s.requireAuth(s.handlePerformanceFragment))
@@ -190,6 +191,62 @@ func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 	s.renderSettings(w, r, "", "")
 }
 
+// arpDiagRow is one raw ARP table entry, annotated with whether it
+// matched a configured LAN segment - built specifically to answer
+// "why isn't this device showing up" without needing to guess at
+// internals or read source code. A mismatch here (an interface string
+// in /proc/net/arp that doesn't match any configured segment's
+// Interface field exactly) is the most common real cause.
+type arpDiagRow struct {
+	IP          string
+	MAC         string
+	Interface   string
+	MatchedName string // segment name if matched, else ""
+	Matched     bool
+}
+
+func (s *Server) handleARPDiagnostics(w http.ResponseWriter, r *http.Request) {
+	snap := s.cfg.Snapshot()
+	segmentByInterface := map[string]string{}
+	for _, seg := range snap.LANSegments {
+		segmentByInterface[seg.Interface] = seg.Name
+	}
+
+	entries, err := netstat.ReadARPTable()
+	var readErr string
+	if err != nil {
+		readErr = err.Error()
+	}
+
+	rows := make([]arpDiagRow, 0, len(entries))
+	for _, e := range entries {
+		name, ok := segmentByInterface[e.Interface]
+		rows = append(rows, arpDiagRow{
+			IP:          e.IP,
+			MAC:         e.MAC,
+			Interface:   e.Interface,
+			MatchedName: name,
+			Matched:     ok,
+		})
+	}
+
+	configuredIfaces := make([]string, 0, len(snap.LANSegments))
+	for _, seg := range snap.LANSegments {
+		configuredIfaces = append(configuredIfaces, seg.Interface)
+	}
+
+	data := struct {
+		Rows             []arpDiagRow
+		ReadErr          string
+		ConfiguredIfaces []string
+	}{Rows: rows, ReadErr: readErr, ConfiguredIfaces: configuredIfaces}
+
+	if err := s.tmpl.ExecuteTemplate(w, "arp_diagnostics.html", data); err != nil {
+		log.Printf("render arp diagnostics: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
 func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, accountErr, accountOK string) {
 	data := settingsData{
 		Snapshot:       s.cfg.Snapshot(),
@@ -212,10 +269,11 @@ type deviceRow struct {
 	Hostname        string
 	IP              string
 	MAC             string
-	Status          string // "reserved", "active", "expired"
+	Status          string // "reserved", "active", "expired", "discovered"
 	TimeLeft        string
 	ExpiresAbsolute string
 	Reserved        bool
+	Discovered      bool   // sourced from the ARP table, not a DHCP lease or reservation - nothing persisted to remove
 	Editing         bool   // whether this row is currently showing the rename form
 	Segment         string // display name of the LAN segment this device is on
 	SegmentID       string // raw segment ID, for quick-action forms that need to preserve it
@@ -317,6 +375,46 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			Segment:         segmentDisplayName(snap.LANSegments, l.SegmentID),
 			SegmentID:       l.SegmentID,
 		})
+		seen[l.MAC] = true
+	}
+
+	// ARP-discovered devices: anything cobweb has exchanged traffic
+	// with but never DHCP-served, e.g. a switch or other device with
+	// a manually-assigned static IP. Passive only (see
+	// netstat.ReadARPTable's doc comment) - this surfaces a device
+	// cobweb already has some reason to know about, not everything
+	// possibly present on the subnet.
+	segmentByInterface := map[string]config.LANSegment{}
+	for _, seg := range snap.LANSegments {
+		segmentByInterface[seg.Interface] = seg
+	}
+	if arpEntries, err := netstat.ReadARPTable(); err != nil {
+		log.Printf("read arp table: %v", err)
+	} else {
+		for _, entry := range arpEntries {
+			if seen[entry.MAC] {
+				continue
+			}
+			seg, ok := segmentByInterface[entry.Interface]
+			if !ok {
+				continue // not on an interface cobweb manages as a LAN segment (e.g. the WAN link) - not relevant here
+			}
+			id := rowID(entry.MAC)
+			rows = append(rows, deviceRow{
+				RowID:           id,
+				Hostname:        resolveHostname(snap.HostnameOverrides, entry.MAC, ""),
+				IP:              entry.IP,
+				MAC:             entry.MAC,
+				Status:          "discovered",
+				ExpiresAbsolute: "Discovered via ARP - not DHCP-tracked",
+				Reserved:        false,
+				Discovered:      true,
+				Editing:         editingIDs[id],
+				Segment:         seg.Name,
+				SegmentID:       seg.ID,
+			})
+			seen[entry.MAC] = true
+		}
 	}
 
 	segmentFilter := strings.TrimSpace(r.URL.Query().Get("segment"))
