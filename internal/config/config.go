@@ -69,6 +69,20 @@ type Lease struct {
 	SegmentID string `json:"segment_id"` // which LANSegment this lease was allocated from
 }
 
+// DiscoveredDevice is a device cobweb has observed via the live ARP
+// table but never DHCP-served - e.g. something with a manually
+// assigned static IP. Persisted (unlike the ARP table itself, which
+// only reflects what the kernel currently has cached) so it keeps
+// showing up even after the device goes quiet long enough for its
+// ARP entry to age out - the same way a DHCP lease stays listed and
+// shows "expired" rather than disappearing outright.
+type DiscoveredDevice struct {
+	MAC       string `json:"mac"`
+	IP        string `json:"ip"`
+	SegmentID string `json:"segment_id"`
+	LastSeen  int64  `json:"last_seen"` // unix seconds, refreshed every time this MAC still shows up live in ARP
+}
+
 // Config holds every setting cobweb needs across its DHCP server, DNS
 // server, and web dashboard.
 type Config struct {
@@ -88,10 +102,11 @@ type Config struct {
 	ListenAddr string `json:"listen_addr"`
 
 	// Data
-	Reservations      []Reservation     `json:"reservations"`
-	DNSRecords        []DNSRecord       `json:"dns_records"`
-	Leases            []Lease           `json:"leases"`
-	HostnameOverrides map[string]string `json:"hostname_overrides"` // MAC -> user-assigned name, takes priority over whatever DHCP reports
+	Reservations      []Reservation      `json:"reservations"`
+	DNSRecords        []DNSRecord        `json:"dns_records"`
+	Leases            []Lease            `json:"leases"`
+	DiscoveredDevices []DiscoveredDevice `json:"discovered_devices"`
+	HostnameOverrides map[string]string  `json:"hostname_overrides"` // MAC -> user-assigned name, takes priority over whatever DHCP reports
 
 	path string       // where this config was loaded from / saves to
 	mu   sync.RWMutex // guards all fields above during concurrent access
@@ -150,6 +165,7 @@ func Default(path string) *Config {
 		Reservations:      []Reservation{},
 		DNSRecords:        []DNSRecord{},
 		Leases:            []Lease{},
+		DiscoveredDevices: []DiscoveredDevice{},
 		HostnameOverrides: map[string]string{},
 		path:              path,
 	}
@@ -261,6 +277,7 @@ type Snapshot struct {
 	Reservations      []Reservation
 	DNSRecords        []DNSRecord
 	Leases            []Lease
+	DiscoveredDevices []DiscoveredDevice
 	HostnameOverrides map[string]string
 }
 
@@ -280,6 +297,7 @@ func (c *Config) Snapshot() Snapshot {
 		Reservations:      append([]Reservation{}, c.Reservations...),
 		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
 		Leases:            append([]Lease{}, c.Leases...),
+		DiscoveredDevices: append([]DiscoveredDevice{}, c.DiscoveredDevices...),
 		HostnameOverrides: copyStringMap(c.HostnameOverrides),
 	}
 }
@@ -487,6 +505,43 @@ func (c *Config) RemoveLease(mac string) error {
 		}
 	}
 	c.Leases = out
+	return c.saveLocked()
+}
+
+// UpsertDiscoveredDevice records or refreshes a device seen via the
+// live ARP table but never DHCP-served. Called every time the
+// devices list is rendered and a MAC shows up in ARP that isn't
+// already covered by a lease or reservation - refreshing LastSeen
+// keeps the record current without ever needing the ARP entry itself
+// to still exist.
+func (c *Config) UpsertDiscoveredDevice(d DiscoveredDevice) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i, existing := range c.DiscoveredDevices {
+		if existing.MAC == d.MAC {
+			c.DiscoveredDevices[i] = d
+			return c.saveLocked()
+		}
+	}
+	c.DiscoveredDevices = append(c.DiscoveredDevices, d)
+	return c.saveLocked()
+}
+
+// RemoveDiscoveredDevice deletes a discovered-device record by MAC.
+// If that device is still actually live on the network, it'll simply
+// get re-added the next time its ARP entry is observed - this is for
+// clearing something you don't want cluttering the list, not for
+// blocking a device.
+func (c *Config) RemoveDiscoveredDevice(mac string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.DiscoveredDevices[:0]
+	for _, d := range c.DiscoveredDevices {
+		if d.MAC != mac {
+			out = append(out, d)
+		}
+	}
+	c.DiscoveredDevices = out
 	return c.saveLocked()
 }
 

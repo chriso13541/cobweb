@@ -3,6 +3,7 @@ package web
 import (
 	"embed"
 	"encoding/binary"
+	"fmt"
 	"html/template"
 	"log"
 	"net"
@@ -74,6 +75,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
 	mux.HandleFunc("/api/reservations/quickremove", s.requireAuth(s.handleQuickRemoveReservation))
 	mux.HandleFunc("/api/leases/quickremove", s.requireAuth(s.handleQuickRemoveLease))
+	mux.HandleFunc("/api/discovered/quickremove", s.requireAuth(s.handleQuickRemoveDiscovered))
 	mux.HandleFunc("/api/devices/rename", s.requireAuth(s.handleRenameDevice))
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
@@ -384,10 +386,17 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 	// netstat.ReadARPTable's doc comment) - this surfaces a device
 	// cobweb already has some reason to know about, not everything
 	// possibly present on the subnet.
+	//
+	// Anything currently live in ARP gets persisted (LastSeen
+	// refreshed) so it keeps showing up even after it goes quiet long
+	// enough for the kernel's own ARP cache to age the entry out -
+	// same as how a DHCP lease stays listed and shows "expired"
+	// rather than disappearing outright the moment it lapses.
 	segmentByInterface := map[string]config.LANSegment{}
 	for _, seg := range snap.LANSegments {
 		segmentByInterface[seg.Interface] = seg
 	}
+	liveDiscovered := map[string]bool{}
 	if arpEntries, err := netstat.ReadARPTable(); err != nil {
 		log.Printf("read arp table: %v", err)
 	} else {
@@ -399,6 +408,11 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue // not on an interface cobweb manages as a LAN segment (e.g. the WAN link) - not relevant here
 			}
+			if err := s.cfg.UpsertDiscoveredDevice(config.DiscoveredDevice{
+				MAC: entry.MAC, IP: entry.IP, SegmentID: seg.ID, LastSeen: now.Unix(),
+			}); err != nil {
+				log.Printf("upsert discovered device: %v", err)
+			}
 			id := rowID(entry.MAC)
 			rows = append(rows, deviceRow{
 				RowID:           id,
@@ -406,7 +420,7 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 				IP:              entry.IP,
 				MAC:             entry.MAC,
 				Status:          "discovered",
-				ExpiresAbsolute: "Discovered via ARP - not DHCP-tracked",
+				ExpiresAbsolute: "Currently seen via ARP - not DHCP-tracked",
 				Reserved:        false,
 				Discovered:      true,
 				Editing:         editingIDs[id],
@@ -414,7 +428,32 @@ func (s *Server) handleDevicesFragment(w http.ResponseWriter, r *http.Request) {
 				SegmentID:       seg.ID,
 			})
 			seen[entry.MAC] = true
+			liveDiscovered[entry.MAC] = true
 		}
+	}
+
+	// Anything previously discovered but not currently live in ARP -
+	// still shown, using its last-known IP, marked offline rather than
+	// silently dropped.
+	for _, d := range snap.DiscoveredDevices {
+		if seen[d.MAC] || liveDiscovered[d.MAC] {
+			continue
+		}
+		id := rowID(d.MAC)
+		rows = append(rows, deviceRow{
+			RowID:           id,
+			Hostname:        resolveHostname(snap.HostnameOverrides, d.MAC, ""),
+			IP:              d.IP,
+			MAC:             d.MAC,
+			Status:          "discovered-offline",
+			ExpiresAbsolute: "Last seen " + time.Unix(d.LastSeen, 0).Format("Jan 2, 3:04 PM") + " - not currently visible via ARP",
+			Reserved:        false,
+			Discovered:      true,
+			Editing:         editingIDs[id],
+			Segment:         segmentDisplayName(snap.LANSegments, d.SegmentID),
+			SegmentID:       d.SegmentID,
+		})
+		seen[d.MAC] = true
 	}
 
 	segmentFilter := strings.TrimSpace(r.URL.Query().Get("segment"))
@@ -703,6 +742,24 @@ func (s *Server) handleQuickRemoveLease(w http.ResponseWriter, r *http.Request) 
 	s.handleDevicesFragment(w, r)
 }
 
+// handleQuickRemoveDiscovered clears a persisted ARP-discovered
+// device entry. If it's still actually live on the network, it'll
+// simply reappear on the next render once its ARP entry is read
+// again - this only clears the stored record, not the device itself.
+func (s *Server) handleQuickRemoveDiscovered(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	mac := strings.TrimSpace(r.FormValue("mac"))
+	if err := s.cfg.RemoveDiscoveredDevice(mac); err != nil {
+		log.Printf("quick remove discovered device: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	s.handleDevicesFragment(w, r)
+}
+
 // handleRenameDevice sets a persistent display-name override for a
 // device. This is deliberately separate from just editing the
 // Lease/Reservation's Hostname field directly: for a dynamic (non
@@ -795,6 +852,44 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	s.renderSettings(w, r, "", "")
 }
 
+// validateSegmentIPs checks that every IP field on a segment is
+// actually a well-formed IPv4 address, and that the pool runs in the
+// right direction. This exists specifically because malformed input
+// (a classic case: typing 192.168.2.256, which looks fine at a glance
+// but 256 isn't a valid octet) used to be silently accepted and saved,
+// only surfacing as a confusing "no address available" failure deep
+// in the DHCP allocator once a real client tried to get a lease. Much
+// better to reject it immediately, with a message that says exactly
+// which field is wrong.
+func validateSegmentIPs(seg config.LANSegment) error {
+	fields := []struct {
+		label string
+		value string
+	}{
+		{"Gateway address", seg.Address},
+		{"Subnet mask", seg.SubnetMask},
+	}
+	if !seg.DHCPDisabled {
+		fields = append(fields,
+			struct{ label, value string }{"Pool start", seg.PoolStart},
+			struct{ label, value string }{"Pool end", seg.PoolEnd},
+		)
+	}
+	for _, f := range fields {
+		if net.ParseIP(f.value).To4() == nil {
+			return fmt.Errorf("%s (%q) isn't a valid IPv4 address", f.label, f.value)
+		}
+	}
+	if !seg.DHCPDisabled {
+		start := net.ParseIP(seg.PoolStart).To4()
+		end := net.ParseIP(seg.PoolEnd).To4()
+		if binary.BigEndian.Uint32(start) > binary.BigEndian.Uint32(end) {
+			return fmt.Errorf("pool start (%s) is after pool end (%s)", seg.PoolStart, seg.PoolEnd)
+		}
+	}
+	return nil
+}
+
 // handleAddLANSegment adds a new VLAN/LAN segment from the settings
 // page. Note that adding or removing a segment here doesn't start or
 // stop its DHCP listener goroutine on its own - that only happens at
@@ -838,6 +933,10 @@ func (s *Server) handleAddLANSegment(w http.ResponseWriter, r *http.Request) {
 	}
 	if seg.Domain == "" {
 		seg.Domain = "lan"
+	}
+	if err := validateSegmentIPs(seg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	if _, err := s.cfg.AddLANSegment(seg); err != nil {
 		log.Printf("add lan segment: %v", err)
@@ -900,6 +999,10 @@ func (s *Server) handleUpdateLANSegment(w http.ResponseWriter, r *http.Request) 
 	}
 	if seg.Domain == "" {
 		seg.Domain = "lan"
+	}
+	if err := validateSegmentIPs(seg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	if err := s.cfg.UpdateLANSegment(id, seg); err != nil {
 		log.Printf("update lan segment: %v", err)

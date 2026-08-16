@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"cobweb/internal/config"
+	"cobweb/internal/netstat"
 	"cobweb/internal/status"
 )
 
@@ -272,6 +273,42 @@ func (s *Server) handleRequest(pkt *Packet) {
 // active lease on this segment if it still has one, the specifically
 // requested IP if that's free and in this segment's pool, or the next
 // free address in this segment's pool.
+// readARPTableFn is a seam for tests: production code always calls
+// the real netstat.ReadARPTable, but tests can substitute synthetic
+// ARP data without needing an actual kernel ARP table to exist.
+var readARPTableFn = netstat.ReadARPTable
+
+// arpTakenIPs returns the set of IPs on the given interface that
+// currently have a live ARP entry belonging to some MAC other than
+// excludeMAC - addresses claimed by a device outside cobweb's own
+// DHCP records entirely, most commonly something set by hand (like a
+// manually-assigned static IP in a device's own network settings).
+//
+// This exists to close a real failure mode: without it, the pool
+// allocator only ever checks its own Leases/Reservations, so it can
+// happily offer an address a static device is already sitting on.
+// The new client ARP-probes the offered address, finds it taken,
+// declines, and retries - landing right back on the same bad offer
+// forever, since cobweb's own records never change. Checking the
+// live ARP table before offering closes that loop.
+func arpTakenIPs(iface, excludeMAC string) map[string]bool {
+	entries, err := readARPTableFn()
+	if err != nil {
+		return map[string]bool{} // fail open - don't block allocation entirely just because this read failed
+	}
+	return arpTakenIPsFromEntries(entries, iface, excludeMAC)
+}
+
+func arpTakenIPsFromEntries(entries []netstat.ARPEntry, iface, excludeMAC string) map[string]bool {
+	taken := map[string]bool{}
+	for _, e := range entries {
+		if e.Interface == iface && e.MAC != excludeMAC {
+			taken[e.IP] = true
+		}
+	}
+	return taken
+}
+
 func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error) {
 	if r, ok := s.cfg.ReservationForMAC(mac); ok && r.SegmentID == s.segmentID {
 		return net.ParseIP(r.IP), nil
@@ -283,15 +320,17 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 		}
 	}
 
-	if requested != nil && s.inPool(requested) && !s.cfg.IPInUse(requested.String(), mac) {
+	seg, err := s.segment()
+	if err != nil {
+		return nil, err
+	}
+	arpTaken := arpTakenIPs(seg.Interface, mac)
+
+	if requested != nil && s.inPool(requested) && !s.cfg.IPInUse(requested.String(), mac) && !arpTaken[requested.String()] {
 		return requested, nil
 	}
 
 	start, end, err := s.cfg.ParsePoolRangeForSegment(s.segmentID)
-	if err != nil {
-		return nil, err
-	}
-	seg, err := s.segment()
 	if err != nil {
 		return nil, err
 	}
@@ -300,9 +339,13 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 		if candidate == seg.Address {
 			continue // never hand out the gateway's own address
 		}
-		if !s.cfg.IPInUse(candidate, mac) {
-			return ip, nil
+		if s.cfg.IPInUse(candidate, mac) {
+			continue
 		}
+		if arpTaken[candidate] {
+			continue // claimed by a device outside cobweb's own DHCP records - e.g. a manually assigned static IP
+		}
+		return ip, nil
 	}
 	return nil, fmt.Errorf("pool exhausted")
 }
