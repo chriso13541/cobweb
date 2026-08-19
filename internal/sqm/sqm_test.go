@@ -33,12 +33,15 @@ func TestApplyGeneratesCorrectCommandSequence(t *testing.T) {
 		t.Fatalf("Apply failed: %v", err)
 	}
 
-	// The exact sequence matters here: ifb must be loaded and up
-	// before anything references it, upload shaping is independent,
-	// and download shaping must set up the ingress qdisc and redirect
-	// filter before the final cake qdisc on the ifb device.
+	// The exact sequence matters here: ifb must be loaded, explicitly
+	// created by name (not just relying on numifbs, which is only
+	// honored on the module's first-ever load), and brought up before
+	// anything references it; upload shaping is independent; download
+	// shaping must set up the ingress qdisc and redirect filter before
+	// the final cake qdisc on the ifb device.
 	want := []recordedCommand{
 		{"modprobe", []string{"ifb", "numifbs=1"}},
+		{"ip", []string{"link", "add", "ifb0", "type", "ifb"}},
 		{"ip", []string{"link", "set", "dev", "ifb0", "up"}},
 		{"tc", []string{"qdisc", "replace", "dev", "wlp2s0", "root", "cake", "bandwidth", "200mbit"}},
 		{"tc", []string{"qdisc", "replace", "dev", "wlp2s0", "handle", "ffff:", "ingress"}},
@@ -48,6 +51,35 @@ func TestApplyGeneratesCorrectCommandSequence(t *testing.T) {
 
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("command sequence mismatch\ngot:  %+v\nwant: %+v", *calls, want)
+	}
+}
+
+func TestApplyTreatsFileExistsAsHarmless(t *testing.T) {
+	// Reproduces the actual reported bug's root cause: if ifb0 (or the
+	// module itself) is already present from an earlier manual test or
+	// a previous Apply call, "ip link add ifb0 type ifb" fails with
+	// "File exists" - that must NOT be treated as a real failure, or
+	// every subsequent Apply call after the first would incorrectly
+	// error out forever.
+	old := runFn
+	var sawBringUp bool
+	runFn = func(name string, args ...string) error {
+		if name == "ip" && len(args) >= 2 && args[0] == "link" && args[1] == "add" {
+			return errors.New("RTNETLINK answers: File exists")
+		}
+		if name == "ip" && len(args) >= 2 && args[0] == "link" && args[1] == "set" {
+			sawBringUp = true
+		}
+		return nil
+	}
+	t.Cleanup(func() { runFn = old })
+
+	err := Apply(Config{Enabled: true, WANInterface: "wlp2s0", DownloadMbit: 190, UploadMbit: 200})
+	if err != nil {
+		t.Fatalf("Apply should tolerate 'File exists' on ifb0 creation, got: %v", err)
+	}
+	if !sawBringUp {
+		t.Fatal("expected Apply to still proceed to bringing the device up after tolerating 'File exists'")
 	}
 }
 

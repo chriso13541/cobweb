@@ -73,6 +73,17 @@ func Apply(cfg Config) error {
 	if err := runFn("modprobe", "ifb", "numifbs=1"); err != nil {
 		return fmt.Errorf("sqm: load ifb kernel module (try 'sudo modprobe ifb' manually to see the real error): %w", err)
 	}
+	// numifbs only controls auto-created devices the very first time
+	// the module is inserted - if ifb was already loaded from an
+	// earlier manual test (or anything else), that modprobe call
+	// above is a silent no-op regardless of numifbs, and no device
+	// may exist at all. Creating it explicitly by name works
+	// regardless of module load history; "File exists" just means a
+	// previous run (or the module itself) already created it, which
+	// is fine, not a real failure.
+	if err := runFn("ip", "link", "add", ifbDevice, "type", "ifb"); err != nil && !strings.Contains(err.Error(), "File exists") {
+		return fmt.Errorf("sqm: create %s device: %w", ifbDevice, err)
+	}
 	if err := runFn("ip", "link", "set", "dev", ifbDevice, "up"); err != nil {
 		return fmt.Errorf("sqm: bring up %s: %w", ifbDevice, err)
 	}
@@ -110,5 +121,6 @@ func Remove(wanInterface string) error {
 	_ = runFn("tc", "qdisc", "del", "dev", wanInterface, "root")
 	_ = runFn("tc", "qdisc", "del", "dev", wanInterface, "ingress")
 	_ = runFn("tc", "qdisc", "del", "dev", ifbDevice, "root")
+	_ = runFn("ip", "link", "del", ifbDevice)
 	return nil
 }
