@@ -418,6 +418,28 @@
       </form>
     </div>
 
+    <div class="section-label">Backup &amp; migrate</div>
+    <div class="panel">
+      <h2>Export / import config</h2>
+      <p class="desc">
+        Everything on this page lives in one JSON file - export it to back it up, or move your whole setup
+        (segments, reservations, DNS records, SQM settings, hostname overrides) to a new machine. Deliberately
+        excludes your login - the admin password lives in a separate file this never touches, so you'll set
+        that up fresh on the new install.
+      </p>
+      <p class="desc">
+        <a href="/api/config/export" class="btn" style="display:inline-block; text-decoration:none;">Export config</a>
+      </p>
+      <p class="desc" style="color:var(--danger);">
+        <strong>Importing replaces everything on this page.</strong> Double-check you have the right file before
+        uploading - there's no undo. Restart cobweb afterward for segment/DHCP changes to fully take effect.
+      </p>
+      <form method="post" action="/api/config/import" enctype="multipart/form-data">
+        <input type="file" name="config_file" accept="application/json">
+        <button type="submit" class="danger" style="margin-top:10px;">Import &amp; replace</button>
+      </form>
+    </div>
+
   </main>
 </body>
 </html>

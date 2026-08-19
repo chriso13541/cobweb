@@ -268,6 +268,63 @@ func (c *Config) saveLocked() error {
 	return os.Rename(tmp, c.path)
 }
 
+// ExportJSON returns the config's current on-disk representation -
+// the exact shape saveLocked writes. Deliberately contains nothing
+// from credentials.json (the login username/password hash live in a
+// completely separate file this package never touches), so it's
+// always safe to hand straight to a browser download.
+func (c *Config) ExportJSON() ([]byte, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return json.MarshalIndent(c, "", "  ")
+}
+
+// ImportJSON replaces the config from an uploaded JSON blob, meant
+// for moving a whole setup to a new machine. Rejects anything that
+// doesn't parse or doesn't look like a real cobweb config before
+// touching anything, rather than partially applying and leaving
+// things broken.
+//
+// Deliberately copies individual fields rather than doing `*c =
+// parsed`: Config embeds its own mutex by value, so wholesale-
+// replacing the struct while c.mu.Lock() is held would overwrite the
+// mutex's own internal state out from under the lock it's currently
+// holding, corrupting it and panicking on the deferred Unlock. Only
+// copying the actual data fields keeps this instance's own mutex and
+// file path untouched.
+func (c *Config) ImportJSON(data []byte) error {
+	var parsed Config
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return fmt.Errorf("not a valid cobweb config file: %w", err)
+	}
+	if parsed.WANInterface == "" && len(parsed.LANSegments) == 0 {
+		return fmt.Errorf("this doesn't look like a cobweb config file (no WAN interface or LAN segments found)")
+	}
+	if parsed.HostnameOverrides == nil {
+		parsed.HostnameOverrides = map[string]string{}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.WANInterface = parsed.WANInterface
+	c.LANSegments = parsed.LANSegments
+	c.LeaseSeconds = parsed.LeaseSeconds
+	c.DNSMode = parsed.DNSMode
+	c.UpstreamServers = parsed.UpstreamServers
+	c.SQMEnabled = parsed.SQMEnabled
+	c.SQMDownloadMbit = parsed.SQMDownloadMbit
+	c.SQMUploadMbit = parsed.SQMUploadMbit
+	c.ListenAddr = parsed.ListenAddr
+	c.Reservations = parsed.Reservations
+	c.DNSRecords = parsed.DNSRecords
+	c.Leases = parsed.Leases
+	c.DiscoveredDevices = parsed.DiscoveredDevices
+	c.HostnameOverrides = parsed.HostnameOverrides
+	// c.path and c.mu are deliberately left untouched - those belong
+	// to this running instance, not the imported file.
+	return c.saveLocked()
+}
+
 // Snapshot is a plain, mutex-free copy of Config's data fields. Unlike
 // Config itself, it's safe to pass around by value - to templates,
 // across goroutines, wherever - since it holds no lock. This is

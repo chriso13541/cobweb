@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func tempConfigPath(t *testing.T) string {
@@ -195,5 +197,80 @@ func TestIPInUseChecksAcrossAllSegments(t *testing.T) {
 	}
 	if c.IPInUse("192.168.20.50", "aa:bb:cc:dd:ee:99") {
 		t.Fatal("IP shouldn't be reported in use when excluding its own owner's MAC")
+	}
+}
+
+func TestExportJSONRoundTripsThroughImport(t *testing.T) {
+	c := Default(tempConfigPath(t))
+	if err := c.AddReservation(Reservation{MAC: "aa:bb:cc:dd:ee:01", IP: "192.168.2.50", Hostname: "nas", SegmentID: c.LANSegments[0].ID}); err != nil {
+		t.Fatalf("AddReservation: %v", err)
+	}
+
+	exported, err := c.ExportJSON()
+	if err != nil {
+		t.Fatalf("ExportJSON: %v", err)
+	}
+
+	// Exported bytes should never contain anything credential-shaped -
+	// config.json and credentials.json are deliberately separate files,
+	// and this package never even sees the latter.
+	if strings.Contains(string(exported), "password") {
+		t.Fatal("exported config should never contain anything password-related")
+	}
+
+	// Import into a fresh, different Config instance (simulating a
+	// brand-new install on a different machine).
+	fresh := Default(tempConfigPath(t))
+	if err := fresh.ImportJSON(exported); err != nil {
+		t.Fatalf("ImportJSON: %v", err)
+	}
+
+	if len(fresh.Reservations) != 1 || fresh.Reservations[0].Hostname != "nas" {
+		t.Fatalf("imported config missing the reservation: %+v", fresh.Reservations)
+	}
+	if len(fresh.LANSegments) != 1 || fresh.LANSegments[0].ID != c.LANSegments[0].ID {
+		t.Fatalf("imported config's segment doesn't match the original: %+v", fresh.LANSegments)
+	}
+}
+
+func TestImportJSONRejectsGarbage(t *testing.T) {
+	c := Default(tempConfigPath(t))
+	if err := c.ImportJSON([]byte("not json at all")); err == nil {
+		t.Fatal("expected an error for unparseable input, got nil")
+	}
+	if err := c.ImportJSON([]byte(`{"hello": "world"}`)); err == nil {
+		t.Fatal("expected an error for valid JSON that doesn't look like a cobweb config, got nil")
+	}
+}
+
+// TestImportJSONDoesNotCorruptTheMutex specifically guards against a
+// real bug class: naively doing `*c = parsed` inside ImportJSON while
+// c.mu.Lock() is held would overwrite the mutex's own internal state
+// (it's embedded by value in Config), corrupting it and panicking on
+// the deferred Unlock. If that regresses, any Config method called
+// immediately after an import would deadlock or panic - this test
+// calls one and would hang or crash if that ever happened again.
+func TestImportJSONDoesNotCorruptTheMutex(t *testing.T) {
+	c := Default(tempConfigPath(t))
+	exported, err := c.ExportJSON()
+	if err != nil {
+		t.Fatalf("ExportJSON: %v", err)
+	}
+	if err := c.ImportJSON(exported); err != nil {
+		t.Fatalf("ImportJSON: %v", err)
+	}
+
+	// If the mutex were corrupted, this would panic or deadlock rather
+	// than complete normally.
+	done := make(chan struct{})
+	go func() {
+		_ = c.AddReservation(Reservation{MAC: "aa:bb:cc:dd:ee:02", IP: "192.168.2.51"})
+		_ = c.Snapshot()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Config methods hung after ImportJSON - the mutex was likely corrupted")
 	}
 }

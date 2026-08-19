@@ -279,6 +279,22 @@ numbers are too high, packets still queue up further upstream (your
 modem, your ISP) before cobweb ever sees them, and shaping can't do
 its job; too low just wastes bandwidth you actually have.
 
+## Backup / moving to a new machine
+
+Settings → Backup & migrate can export the entire config as a single
+JSON file, and import one back in - meant for backing things up or
+moving a whole setup (segments, reservations, DNS records, SQM
+settings, hostname overrides) to a new box without re-entering
+everything by hand. The export deliberately excludes your login - the
+admin password lives in a completely separate file
+(`/etc/cobweb/credentials.json`) this feature never touches - so
+you'll set that up fresh on the new install.
+
+Importing replaces everything on this page; there's no undo, so
+double-check the file before uploading. Same as adding a LAN segment,
+a restart is needed afterward for segment/DHCP changes to take full
+effect.
+
 ## Project layout
 
 ```

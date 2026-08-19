@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -85,6 +86,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/segments/add", s.requireAuth(s.handleAddLANSegment))
 	mux.HandleFunc("/api/segments/update", s.requireAuth(s.handleUpdateLANSegment))
 	mux.HandleFunc("/api/segments/remove", s.requireAuth(s.handleRemoveLANSegment))
+	mux.HandleFunc("/api/config/export", s.requireAuth(s.handleExportConfig))
+	mux.HandleFunc("/api/config/import", s.requireAuth(s.handleImportConfig))
 	mux.HandleFunc("/api/account/update", s.requireAuth(s.handleAccountUpdate))
 
 	return mux
@@ -894,6 +897,56 @@ func (s *Server) handleUpdateSQM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderSettings(w, r, "", "Traffic shaping settings applied.")
+}
+
+// handleExportConfig serves the current config as a downloadable JSON
+// file, meant for moving a whole setup to a new machine. Deliberately
+// contains nothing credential-related - the admin login lives in a
+// completely separate file this handler never touches - so it's
+// always safe to hand straight to a browser download with no
+// redaction step needed.
+func (s *Server) handleExportConfig(w http.ResponseWriter, r *http.Request) {
+	data, err := s.cfg.ExportJSON()
+	if err != nil {
+		log.Printf("export config: %v", err)
+		http.Error(w, "failed to export config", http.StatusInternalServerError)
+		return
+	}
+	filename := fmt.Sprintf("cobweb-config-%s.json", time.Now().Format("2006-01-02"))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Write(data)
+}
+
+// handleImportConfig replaces the entire config from an uploaded
+// file. A big, impactful action - the config layer already rejects
+// anything that doesn't parse or doesn't look like a real cobweb
+// config before touching anything, and this still needs a restart
+// afterward for segment/DHCP changes to actually take effect, same as
+// any other segment-level change.
+func (s *Server) handleImportConfig(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(10 << 20); err != nil { // 10MB cap - far more than any real config file needs
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	file, _, err := r.FormFile("config_file")
+	if err != nil {
+		s.renderSettings(w, r, "No file was uploaded.", "")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		s.renderSettings(w, r, "Failed to read the uploaded file.", "")
+		return
+	}
+
+	if err := s.cfg.ImportJSON(data); err != nil {
+		s.renderSettings(w, r, "Import failed: "+err.Error(), "")
+		return
+	}
+	s.renderSettings(w, r, "", "Config imported. Restart cobweb for segment/DHCP changes to fully take effect.")
 }
 
 // validateSegmentIPs checks that every IP field on a segment is
