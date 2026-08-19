@@ -98,6 +98,14 @@ type Config struct {
 	DNSMode         string   `json:"dns_mode"`         // "forward" (default) or "recursive"
 	UpstreamServers []string `json:"upstream_servers"` // e.g. ["1.1.1.1:53", "9.9.9.9:53"] - used when dns_mode is "forward"
 
+	// SQM (Smart Queue Management) - fights bufferbloat on the WAN
+	// link. Off by default: enabling it with the wrong bandwidth
+	// numbers can make things worse, not better, so it needs a
+	// person's actual measured throughput, not a guess.
+	SQMEnabled      bool `json:"sqm_enabled"`
+	SQMDownloadMbit int  `json:"sqm_download_mbit"`
+	SQMUploadMbit   int  `json:"sqm_upload_mbit"`
+
 	// Dashboard
 	ListenAddr string `json:"listen_addr"`
 
@@ -273,6 +281,9 @@ type Snapshot struct {
 	LeaseSeconds      int
 	DNSMode           string
 	UpstreamServers   []string
+	SQMEnabled        bool
+	SQMDownloadMbit   int
+	SQMUploadMbit     int
 	ListenAddr        string
 	Reservations      []Reservation
 	DNSRecords        []DNSRecord
@@ -293,6 +304,9 @@ func (c *Config) Snapshot() Snapshot {
 		LeaseSeconds:      c.LeaseSeconds,
 		DNSMode:           c.DNSMode,
 		UpstreamServers:   append([]string{}, c.UpstreamServers...),
+		SQMEnabled:        c.SQMEnabled,
+		SQMDownloadMbit:   c.SQMDownloadMbit,
+		SQMUploadMbit:     c.SQMUploadMbit,
 		ListenAddr:        c.ListenAddr,
 		Reservations:      append([]Reservation{}, c.Reservations...),
 		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
@@ -577,6 +591,19 @@ func (c *Config) UpdateGlobalNetwork(wan, dnsMode string, leaseSeconds int, upst
 	c.DNSMode = dnsMode
 	c.LeaseSeconds = leaseSeconds
 	c.UpstreamServers = upstream
+	return c.saveLocked()
+}
+
+// UpdateSQM persists traffic-shaping settings. Doesn't apply them to
+// the kernel itself - that's the web handler's job, since this
+// package intentionally has no dependency on the sqm package (config
+// stays a pure data layer).
+func (c *Config) UpdateSQM(enabled bool, downloadMbit, uploadMbit int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.SQMEnabled = enabled
+	c.SQMDownloadMbit = downloadMbit
+	c.SQMUploadMbit = uploadMbit
 	return c.saveLocked()
 }
 

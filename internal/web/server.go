@@ -18,6 +18,7 @@ import (
 	"cobweb/internal/config"
 	"cobweb/internal/dnsserver"
 	"cobweb/internal/netstat"
+	"cobweb/internal/sqm"
 	"cobweb/internal/status"
 )
 
@@ -80,6 +81,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
 	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
 	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
+	mux.HandleFunc("/api/sqm/update", s.requireAuth(s.handleUpdateSQM))
 	mux.HandleFunc("/api/segments/add", s.requireAuth(s.handleAddLANSegment))
 	mux.HandleFunc("/api/segments/update", s.requireAuth(s.handleUpdateLANSegment))
 	mux.HandleFunc("/api/segments/remove", s.requireAuth(s.handleRemoveLANSegment))
@@ -850,6 +852,48 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderSettings(w, r, "", "")
+}
+
+// handleUpdateSQM saves and immediately applies traffic-shaping
+// settings - unlike a LAN segment change, this doesn't need a
+// restart, since reapplying tc/cake configuration is cheap and safe
+// to do live. If the underlying kernel-level apply fails (e.g. the
+// cake or ifb kernel modules aren't available on this machine), that
+// failure is surfaced directly rather than silently claiming success -
+// the setting is still saved either way, so it's easy to retry once
+// the underlying issue (usually a missing kernel module) is fixed.
+func (s *Server) handleUpdateSQM(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("sqm_enabled") != ""
+	downloadMbit, dErr := strconv.Atoi(strings.TrimSpace(r.FormValue("sqm_download_mbit")))
+	uploadMbit, uErr := strconv.Atoi(strings.TrimSpace(r.FormValue("sqm_upload_mbit")))
+	if enabled && (dErr != nil || uErr != nil || downloadMbit <= 0 || uploadMbit <= 0) {
+		http.Error(w, "download and upload limits must be positive numbers when SQM is enabled", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.cfg.UpdateSQM(enabled, downloadMbit, uploadMbit); err != nil {
+		log.Printf("update sqm: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+
+	snap := s.cfg.Snapshot()
+	applyErr := sqm.Apply(sqm.Config{
+		Enabled:      enabled,
+		WANInterface: snap.WANInterface,
+		DownloadMbit: downloadMbit,
+		UploadMbit:   uploadMbit,
+	})
+	if applyErr != nil {
+		log.Printf("sqm: apply failed: %v", applyErr)
+		s.renderSettings(w, r, "Saved, but failed to apply: "+applyErr.Error(), "")
+		return
+	}
+	s.renderSettings(w, r, "", "Traffic shaping settings applied.")
 }
 
 // validateSegmentIPs checks that every IP field on a segment is

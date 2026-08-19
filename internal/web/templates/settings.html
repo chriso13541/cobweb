@@ -201,6 +201,44 @@
       </form>
     </div>
 
+    <div class="section-label">Traffic shaping</div>
+    <div class="panel">
+      <h2>Smart Queue Management</h2>
+      <p class="desc">
+        Fights bufferbloat: without this, a single saturating flow (a big download, a backup) can queue up
+        enough data on the WAN link that latency-sensitive traffic sharing it - a game, a video call - gets
+        stuck waiting behind it, even though those packets are tiny. This applies fair queuing plus active
+        queue management (the <code>cake</code> qdisc) to the WAN link, so no single flow can monopolize it.
+        Applies immediately - no restart needed.
+      </p>
+      <p class="desc">
+        <strong>Set both numbers a bit below your actual measured speed</strong> (try ~90% of what a speed
+        test shows) - if the numbers are too high, shaping can't do its job, since traffic queues up further
+        upstream (in your modem, at your ISP) before it ever reaches cobweb. Setting them too low wastes
+        bandwidth you actually have.
+      </p>
+      <form method="post" action="/api/sqm/update">
+        <label class="mode-option" style="margin-bottom:14px;">
+          <input type="checkbox" name="sqm_enabled" value="1" {{if .SQMEnabled}}checked{{end}} style="margin-top:2px; width:auto;">
+          <div>
+            <div class="mode-title">Enable traffic shaping</div>
+            <div class="mode-desc">Requires the <code>cake</code> and <code>ifb</code> kernel modules to be available - if applying fails, this page will say so directly.</div>
+          </div>
+        </label>
+        <div class="grid2">
+          <div>
+            <label>Download limit (Mbit/s)</label>
+            <input type="number" name="sqm_download_mbit" value="{{if .SQMDownloadMbit}}{{.SQMDownloadMbit}}{{end}}" placeholder="e.g. 190">
+          </div>
+          <div>
+            <label>Upload limit (Mbit/s)</label>
+            <input type="number" name="sqm_upload_mbit" value="{{if .SQMUploadMbit}}{{.SQMUploadMbit}}{{end}}" placeholder="e.g. 200">
+          </div>
+        </div>
+        <button type="submit">Save &amp; apply</button>
+      </form>
+    </div>
+
     <div class="section-label">LAN segments (VLANs)</div>
     <div class="panel">
       <h2>Routed networks</h2>

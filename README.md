@@ -253,6 +253,32 @@ immediately, but the DHCP listener goroutines are only started at
 boot - a restart is what actually brings a new segment's listener up
 or tears a removed one down.
 
+## Traffic shaping (Smart Queue Management)
+
+Settings → Traffic shaping applies `cake` (fair queuing + active queue
+management) to the WAN link, to fight bufferbloat - the reason a big
+download can spike ping in a game running at the same time, even
+though nothing is actually short on bandwidth. Applies immediately, no
+restart needed.
+
+This needs the `cake` and `ifb` kernel modules, both standard on a
+normal Linux install:
+```bash
+sudo modprobe sch_cake
+sudo modprobe ifb
+```
+If applying fails, the Settings page shows the real underlying error
+directly rather than silently pretending it worked - the setting is
+still saved either way, so retrying is just a matter of saving the
+form again once the actual issue (usually a missing kernel module) is
+fixed.
+
+Set both the download and upload numbers to roughly 90% of your
+*actual measured* throughput, not your ISP's advertised speed - if the
+numbers are too high, packets still queue up further upstream (your
+modem, your ISP) before cobweb ever sees them, and shaping can't do
+its job; too low just wastes bandwidth you actually have.
+
 ## Project layout
 
 ```

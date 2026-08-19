@@ -17,6 +17,7 @@ import (
 	"cobweb/internal/config"
 	"cobweb/internal/dhcp"
 	"cobweb/internal/dnsserver"
+	"cobweb/internal/sqm"
 	"cobweb/internal/web"
 )
 
@@ -71,6 +72,17 @@ func main() {
 
 	dnsSrv := dnsserver.New(cfg)
 	go runForever("dns", dnsSrv.Run)
+
+	if startupSnap.SQMEnabled {
+		if err := sqm.Apply(sqm.Config{
+			Enabled:      true,
+			WANInterface: startupSnap.WANInterface,
+			DownloadMbit: startupSnap.SQMDownloadMbit,
+			UploadMbit:   startupSnap.SQMUploadMbit,
+		}); err != nil {
+			log.Printf("sqm: failed to apply traffic shaping at startup: %v", err)
+		}
+	}
 
 	webSrv, err := web.New(cfg, credStore)
 	if err != nil {
