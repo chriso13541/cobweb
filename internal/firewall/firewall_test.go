@@ -2,6 +2,8 @@ package firewall
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -355,5 +357,226 @@ func TestForeignTablesIgnoresCobwebsOwn(t *testing.T) {
 	outputFn = func(name string, args ...string) (string, error) { return "", errors.New("nft: not found") }
 	if got := ForeignTables(); got != nil {
 		t.Fatalf("expected nil when nft is unavailable, got %v", got)
+	}
+}
+
+// --- Docker ---
+
+func dockerSnap(mut func(*config.Snapshot)) config.Snapshot {
+	snap := testSnap()
+	snap.DockerEnabled = true
+	if mut != nil {
+		mut(&snap)
+	}
+	return snap
+}
+
+func TestDockerOffRendersExactlyTheBaseline(t *testing.T) {
+	off := testSnap()
+	off.DockerInterfaces = []string{"docker0"} // configured but not enabled: must have no effect
+	off.DockerWANSource = "192.168.1.20"
+	if a, b := mustRender(t, off), mustRender(t, testSnap()); a != b {
+		t.Fatalf("Docker settings changed the ruleset while disabled:\n%s\n--- vs ---\n%s", a, b)
+	}
+	if strings.Contains(mustRender(t, testSnap()), "docker") {
+		t.Fatal("baseline ruleset mentions docker")
+	}
+}
+
+func TestDockerRulesUseDefaultBridges(t *testing.T) {
+	out := mustRender(t, dockerSnap(nil))
+	lans := `{ "enp1s0", "enp1s0.20" }`
+	for _, d := range []string{"docker0", "br-*"} {
+		requireContains(t, out,
+			`iifname "`+d+`" accept comment`,                         // containers -> the router itself
+			`iifname "`+d+`" oifname "`+d+`" accept`,                 // same network (br_netfilter)
+			`iifname "`+d+`" oifname `+lans+` accept`,                // containers -> LAN segments
+			`iifname "`+d+`" oifname "wlp2s0" accept`,                // containers -> WAN
+			`iifname `+lans+` oifname "`+d+`" ct status dnat accept`, // LAN -> published ports only
+			`iifname "wlp2s0" oifname "`+d+`" ct status dnat accept`, // WAN -> published ports only
+		)
+	}
+}
+
+func TestDockerPublishedPortsAreTheOnlyWayIn(t *testing.T) {
+	out := mustRender(t, dockerSnap(nil))
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, `oifname "docker0"`) || strings.Contains(line, `oifname "br-*"`) {
+			if strings.Contains(line, `iifname "wlp2s0"`) && !strings.Contains(line, "ct status dnat") {
+				t.Errorf("WAN may reach a container without going through a published port: %s", line)
+			}
+			if strings.Contains(line, "enp1s0") && strings.Contains(line, "iifname {") && !strings.Contains(line, "ct status dnat") {
+				t.Errorf("a LAN may reach a container without going through a published port: %s", line)
+			}
+		}
+	}
+}
+
+func TestDockerWANSourceLimitsPublishedPortsOnly(t *testing.T) {
+	out := mustRender(t, dockerSnap(func(s *config.Snapshot) { s.DockerWANSource = "192.168.1.20" }))
+	requireContains(t, out, `iifname "wlp2s0" oifname "docker0" ip saddr 192.168.1.20 ct status dnat accept`)
+	// the LAN side is trusted and not restricted by it
+	requireContains(t, out, `oifname "docker0" ct status dnat accept`)
+	if strings.Contains(out, `iifname { "enp1s0", "enp1s0.20" } oifname "docker0" ip saddr`) {
+		t.Error("the WAN source limit leaked onto the LAN rule")
+	}
+}
+
+func TestDockerCustomInterfacesReplaceTheDefaults(t *testing.T) {
+	out := mustRender(t, dockerSnap(func(s *config.Snapshot) { s.DockerInterfaces = []string{" mybridge ", "docker0", "docker0"} }))
+	requireContains(t, out, `iifname "mybridge" accept`, `iifname "docker0" accept`)
+	if strings.Contains(out, `"br-*"`) {
+		t.Error("default br-* leaked in despite a custom list")
+	}
+	if n := strings.Count(out, `iifname "docker0" accept`); n != 1 {
+		t.Errorf("duplicate pattern rendered %d times", n)
+	}
+}
+
+func TestDockerRejectsInterfacesThatWouldTrustTheWANOrALAN(t *testing.T) {
+	cases := map[string]func(*config.Snapshot){
+		"wan matched by wildcard": func(s *config.Snapshot) { s.DockerInterfaces = []string{"wl*"} },
+		"wan named like a bridge": func(s *config.Snapshot) { s.WANInterface = "br-uplink" }, // default br-* now covers the WAN
+		"lan named like a bridge": func(s *config.Snapshot) { s.LANSegments[0].Interface = "br-lan" },
+		"bare star":               func(s *config.Snapshot) { s.DockerInterfaces = []string{"*"} },
+		"loopback":                func(s *config.Snapshot) { s.DockerInterfaces = []string{"lo"} },
+		"wan exactly":             func(s *config.Snapshot) { s.DockerInterfaces = []string{"wlp2s0"} },
+		"lan vlan via prefix":     func(s *config.Snapshot) { s.DockerInterfaces = []string{"enp1s0.*"} },
+		"star in the middle":      func(s *config.Snapshot) { s.DockerInterfaces = []string{"br*x"} },
+		"quote breaks out":        func(s *config.Snapshot) { s.DockerInterfaces = []string{`docker0" accept; flush ruleset; "`} },
+		"space":                   func(s *config.Snapshot) { s.DockerInterfaces = []string{"docker 0"} },
+		"too long":                func(s *config.Snapshot) { s.DockerInterfaces = []string{"abcdefghijklmnop"} },
+		"only blanks":             func(s *config.Snapshot) { s.DockerInterfaces = []string{" ", ""}; s.WANInterface = "br-uplink" },
+		"bad source":              func(s *config.Snapshot) { s.DockerWANSource = "10.0.0.0/33" },
+		"source with nft syntax":  func(s *config.Snapshot) { s.DockerWANSource = "1.2.3.4 accept; flush ruleset" },
+		"ipv6 source":             func(s *config.Snapshot) { s.DockerWANSource = "fe80::1" },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			snap := dockerSnap(mut)
+			if out, err := Render(snap); err == nil {
+				t.Fatalf("expected an error, got a ruleset:\n%s", out)
+			}
+			if err := ValidateDocker(snap); err == nil {
+				t.Fatalf("ValidateDocker accepted it")
+			}
+		})
+	}
+}
+
+func TestPatternsOverlap(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"br-*", "br-lan", true}, {"br-*", "br-*", true}, {"br-*", "b*", true}, {"b*", "br-*", true},
+		{"br-*", "docker0", false}, {"docker0", "docker0", true}, {"docker0", "docker1", false},
+		{"enp1s0.*", "enp1s0", false}, {"enp1s0.*", "enp1s0.20", true}, {"wl*", "wlp2s0", true},
+		{"br-*", "eth0", false},
+	} {
+		if got := patternsOverlap(c.a, c.b); got != c.want {
+			t.Errorf("patternsOverlap(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+		if got := patternsOverlap(c.b, c.a); got != c.want {
+			t.Errorf("patternsOverlap(%q, %q) = %v, want %v (not symmetric)", c.b, c.a, got, c.want)
+		}
+	}
+}
+
+func TestDockerWarnsWhenAnySourceMayReachPublishedPorts(t *testing.T) {
+	has := func(snap config.Snapshot) bool {
+		for _, w := range Warnings(snap) {
+			if strings.Contains(w, "published ports") {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(dockerSnap(nil)) {
+		t.Error("expected a warning when Docker is on with no source limit")
+	}
+	if has(dockerSnap(func(s *config.Snapshot) { s.DockerWANSource = "192.168.1.20" })) {
+		t.Error("warned even though a source limit is set")
+	}
+	if has(testSnap()) {
+		t.Error("warned about Docker while Docker is off")
+	}
+}
+
+// Shapes taken from `nft -j list chains` on a box running Docker's iptables-nft backend,
+// Docker's own nftables backend, and a plain hand-written router.
+const (
+	jsonDockerIptablesNft = `{"nftables":[{"metainfo":{"version":"1.0.9"}},
+	 {"chain":{"family":"ip","table":"filter","name":"FORWARD","handle":1,"type":"filter","hook":"forward","prio":0,"policy":"drop"}},
+	 {"chain":{"family":"ip","table":"filter","name":"DOCKER-USER","handle":2}},
+	 {"chain":{"family":"ip","table":"filter","name":"DOCKER","handle":3}},
+	 {"chain":{"family":"ip","table":"filter","name":"INPUT","handle":4,"type":"filter","hook":"input","prio":0,"policy":"accept"}},
+	 {"chain":{"family":"ip","table":"nat","name":"PREROUTING","handle":5,"type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},
+	 {"chain":{"family":"inet","table":"cobweb","name":"forward","handle":6,"type":"filter","hook":"forward","prio":0,"policy":"drop"}}]}`
+	jsonDockerNoDrop = `{"nftables":[
+	 {"chain":{"family":"ip","table":"filter","name":"FORWARD","type":"filter","hook":"forward","prio":0,"policy":"accept"}},
+	 {"chain":{"family":"ip","table":"filter","name":"DOCKER","handle":3}}]}`
+	jsonDockerNativeBackend = `{"nftables":[
+	 {"chain":{"family":"ip","table":"docker-bridges","name":"filter-FORWARD","type":"filter","hook":"forward","prio":0,"policy":"accept"}}]}`
+	jsonHandWrittenRouter = `{"nftables":[
+	 {"chain":{"family":"inet","table":"filter","name":"forward","type":"filter","hook":"forward","prio":0,"policy":"drop"}},
+	 {"chain":{"family":"ip","table":"nat","name":"postrouting","type":"nat","hook":"postrouting","prio":100,"policy":"accept"}}]}`
+)
+
+func TestParseEnvironment(t *testing.T) {
+	env := parseEnvironment(jsonDockerIptablesNft)
+	if !env.DockerDetected || len(env.DockerForwardDrops) != 1 || env.DockerForwardDrops[0] != "ip filter FORWARD" {
+		t.Errorf("Docker + drop policy not recognised: %+v", env)
+	}
+	if len(env.ForwardDrops) != 1 {
+		t.Errorf("cobweb's own forward chain must be ignored, got %v", env.ForwardDrops)
+	}
+
+	env = parseEnvironment(jsonDockerNoDrop)
+	if !env.DockerDetected || len(env.ForwardDrops) != 0 || len(env.DockerForwardDrops) != 0 {
+		t.Errorf("ip-forward-no-drop setup flagged: %+v", env)
+	}
+
+	env = parseEnvironment(jsonDockerNativeBackend)
+	if !env.DockerDetected || len(env.ForwardDrops) != 0 {
+		t.Errorf("docker's nftables backend not recognised, or wrongly flagged: %+v", env)
+	}
+
+	// An old hand-written router has a legitimate drop policy: reported as a forward-drop
+	// table, but never accused of being Docker.
+	env = parseEnvironment(jsonHandWrittenRouter)
+	if env.DockerDetected || len(env.DockerForwardDrops) != 0 || len(env.ForwardDrops) != 1 {
+		t.Errorf("hand-written router misclassified: %+v", env)
+	}
+
+	for _, junk := range []string{"", "not json", "{}", `{"nftables":null}`, `{"nftables":[{"chain":null}]}`} {
+		if env := parseEnvironment(junk); env.DockerDetected || len(env.ForwardDrops) != 0 {
+			t.Errorf("junk %q produced %+v", junk, env)
+		}
+	}
+}
+
+func TestDetectEnvironmentWithoutNft(t *testing.T) {
+	old := outputFn
+	defer func() { outputFn = old }()
+	outputFn = func(string, ...string) (string, error) { return "", errors.New("nft: not found") }
+	if env := DetectEnvironment(); env.DockerDetected || len(env.ForwardDrops) != 0 {
+		t.Errorf("expected zero Environment, got %+v", env)
+	}
+}
+
+// If nft is here and we may use it, the Docker ruleset must at least pass nft's own syntax
+// check (the lab scenarios exercise it for real).
+func TestDockerRulesetPassesRealNftSyntaxCheck(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root for nft -c")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft not installed")
+	}
+	cmd := exec.Command("nft", "-c", "-f", "-")
+	cmd.Stdin = strings.NewReader(mustRender(t, dockerSnap(func(s *config.Snapshot) { s.DockerWANSource = "192.168.1.0/24" })))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("nft -c unavailable here (%v: %s)", err, out) // e.g. no CAP_NET_ADMIN in this sandbox
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"cobweb/internal/config"
 	"cobweb/internal/firewall"
@@ -169,4 +170,50 @@ func (s *Server) handleFirewallToggleRule(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.renderFirewall(w, http.StatusOK, "", "Rule turned on.")
+}
+
+// handleFirewallDocker saves the Docker coexistence settings. They are
+// validated before anything is stored, applied right away if the firewall is
+// on, and rolled back to the previous values if the kernel refuses them.
+func (s *Server) handleFirewallDocker(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	enabled := r.PostFormValue("docker_enabled") == "1"
+	ifaces := strings.FieldsFunc(r.PostFormValue("docker_interfaces"), func(c rune) bool {
+		return c == ',' || unicode.IsSpace(c)
+	})
+	source := strings.TrimSpace(r.PostFormValue("docker_wan_source"))
+
+	prev := s.cfg.Snapshot()
+	candidate := prev
+	candidate.DockerEnabled, candidate.DockerInterfaces, candidate.DockerWANSource = enabled, ifaces, source
+	if err := firewall.ValidateDocker(candidate); err != nil {
+		s.renderFirewall(w, http.StatusBadRequest, "Docker settings not saved: "+err.Error(), "")
+		return
+	}
+
+	if err := s.cfg.SetDocker(enabled, ifaces, source); err != nil {
+		log.Printf("docker settings: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	if err := s.applyIfEnabled(); err != nil {
+		log.Printf("firewall: apply after docker settings: %v", err)
+		if rerr := s.cfg.SetDocker(prev.DockerEnabled, prev.DockerInterfaces, prev.DockerWANSource); rerr != nil {
+			log.Printf("firewall: roll back docker settings: %v", rerr)
+		}
+		s.renderFirewall(w, http.StatusOK, "Docker settings not changed - applying them failed and nothing was changed. "+err.Error(), "")
+		return
+	}
+
+	switch {
+	case !s.cfg.Snapshot().FirewallEnabled:
+		s.renderFirewall(w, http.StatusOK, "", "Docker settings saved. They take effect once the firewall is enabled.")
+	case enabled:
+		s.renderFirewall(w, http.StatusOK, "", "Docker containers are now allowed through and the change is live.")
+	default:
+		s.renderFirewall(w, http.StatusOK, "", "Docker containers are no longer given a path through the firewall.")
+	}
 }

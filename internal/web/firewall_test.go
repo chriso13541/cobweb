@@ -12,6 +12,7 @@ import (
 
 	"cobweb/internal/auth"
 	"cobweb/internal/config"
+	"cobweb/internal/firewall"
 )
 
 // newTestServer builds a real Server (templates and all) over a temp
@@ -29,6 +30,7 @@ func newTestServer(t *testing.T) (srv *Server, token string, applied *[]config.S
 	if err != nil {
 		t.Fatalf("web.New (templates failed to parse?): %v", err)
 	}
+	srv.detectEnv = func() firewall.Environment { return firewall.Environment{} }
 	var calls []config.Snapshot
 	srv.applyFirewall = func(s config.Snapshot) error {
 		calls = append(calls, s)
@@ -89,7 +91,7 @@ func TestMutatingRoutesRejectGET(t *testing.T) {
 		"/api/reservations/quickremove", "/api/leases/quickremove", "/api/discovered/quickremove",
 		"/api/devices/rename", "/api/dns/add", "/api/dns/remove", "/api/network/update",
 		"/api/sqm/update", "/api/firewall/toggle", "/api/firewall/rules/add",
-		"/api/firewall/rules/remove", "/api/firewall/rules/toggle", "/api/segments/add",
+		"/api/firewall/rules/remove", "/api/firewall/rules/toggle", "/api/firewall/docker", "/api/segments/add",
 		"/api/segments/update", "/api/segments/remove", "/api/config/import", "/api/account/update",
 	}
 	for _, p := range paths {
@@ -256,5 +258,107 @@ func TestRemoveAndToggleRule(t *testing.T) {
 	rr = do(srv, token, http.MethodPost, "/api/firewall/rules/remove", url.Values{"id": {id}})
 	if !strings.Contains(rr.Body.String(), "Rule removed") || len(srv.cfg.Snapshot().PortRules) != 0 {
 		t.Fatalf("remove failed:\n%s", rr.Body.String())
+	}
+}
+
+func dockerForm(enabled, ifaces, source string) url.Values {
+	return url.Values{"docker_enabled": {enabled}, "docker_interfaces": {ifaces}, "docker_wan_source": {source}}
+}
+
+func TestDockerSettingsSaveAndApplyWhenFirewallIsOn(t *testing.T) {
+	srv, token, applied := newTestServer(t)
+	_ = srv.cfg.SetFirewallEnabled(true)
+
+	rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", "docker0, br-*  custom0", "192.168.1.20"))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Docker containers are now allowed through") {
+		t.Fatalf("got %d; body:\n%s", rr.Code, rr.Body.String())
+	}
+	snap := srv.cfg.Snapshot()
+	if !snap.DockerEnabled || snap.DockerWANSource != "192.168.1.20" {
+		t.Fatalf("not saved: %+v", snap)
+	}
+	if got := strings.Join(snap.DockerInterfaces, "|"); got != "docker0|br-*|custom0" {
+		t.Fatalf("interfaces = %q, want the comma/space separated list split", got)
+	}
+	if len(*applied) != 1 || !(*applied)[0].DockerEnabled {
+		t.Fatalf("expected one apply with docker on, got %d", len(*applied))
+	}
+}
+
+func TestDockerSettingsWhileFirewallOffAreSavedButNotApplied(t *testing.T) {
+	srv, token, applied := newTestServer(t)
+	rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", "", ""))
+	if !strings.Contains(rr.Body.String(), "take effect once the firewall is enabled") {
+		t.Fatalf("unexpected message:\n%s", rr.Body.String())
+	}
+	if !srv.cfg.Snapshot().DockerEnabled || len(*applied) != 0 {
+		t.Fatal("expected saved without touching the kernel")
+	}
+}
+
+func TestDockerSettingsRejectInterfacesThatCouldMatchTheWANOrALAN(t *testing.T) {
+	for _, bad := range []string{"wl*", "enp*", "*", `docker0" accept`, "lo", "a-very-long-interface-name"} {
+		srv, token, applied := newTestServer(t)
+		_ = srv.cfg.SetFirewallEnabled(true)
+		rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", bad, ""))
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%q: got %d, want 400", bad, rr.Code)
+		}
+		if srv.cfg.Snapshot().DockerEnabled || len(*applied) != 0 {
+			t.Errorf("%q: rejected settings were saved or applied", bad)
+		}
+	}
+	srv, token, _ := newTestServer(t)
+	if rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", "", "not-an-ip")); rr.Code != http.StatusBadRequest {
+		t.Errorf("bad source: got %d, want 400", rr.Code)
+	}
+}
+
+func TestDockerSettingsRollBackWhenApplyFails(t *testing.T) {
+	srv, token, _ := newTestServer(t)
+	_ = srv.cfg.SetFirewallEnabled(true)
+	srv.applyFirewall = func(config.Snapshot) error { return errors.New("nft said no") }
+	rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", "", ""))
+	if !strings.Contains(rr.Body.String(), "nothing was changed") || srv.cfg.Snapshot().DockerEnabled {
+		t.Fatalf("expected rollback; docker=%v body:\n%s", srv.cfg.Snapshot().DockerEnabled, rr.Body.String())
+	}
+}
+
+func TestSettingsPageExplainsDockersDropPolicyAndTheFix(t *testing.T) {
+	srv, token, _ := newTestServer(t)
+	srv.detectEnv = func() firewall.Environment {
+		return firewall.Environment{
+			DockerDetected:     true,
+			ForwardDrops:       []string{"ip filter FORWARD"},
+			DockerForwardDrops: []string{"ip filter FORWARD"},
+		}
+	}
+	body := do(srv, token, http.MethodGet, "/settings", nil).Body.String()
+	for _, want := range []string{"Docker is cutting off forwarded traffic", "ip filter FORWARD", "ip-forward-no-drop", "/etc/docker/daemon.json", "systemctl restart docker"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("settings page missing %q", want)
+		}
+	}
+
+	// No Docker, no scary banner. (An unrelated forward-drop table is covered by the
+	// generic "other tables" notice, not this one.)
+	srv.detectEnv = func() firewall.Environment {
+		return firewall.Environment{ForwardDrops: []string{"inet filter forward"}}
+	}
+	if body := do(srv, token, http.MethodGet, "/settings", nil).Body.String(); strings.Contains(body, "Docker is cutting off") {
+		t.Error("the Docker warning appeared for a non-Docker table")
+	}
+}
+
+func TestSettingsPageNudgesWhenDockerIsInstalledButNotAllowed(t *testing.T) {
+	srv, token, _ := newTestServer(t)
+	_ = srv.cfg.SetFirewallEnabled(true)
+	srv.detectEnv = func() firewall.Environment { return firewall.Environment{DockerDetected: true} }
+	if body := do(srv, token, http.MethodGet, "/settings", nil).Body.String(); !strings.Contains(body, "containers currently have no network") {
+		t.Error("expected the Docker-installed-but-off notice")
+	}
+	_ = srv.cfg.SetDocker(true, nil, "")
+	if body := do(srv, token, http.MethodGet, "/settings", nil).Body.String(); strings.Contains(body, "containers currently have no network") {
+		t.Error("the notice should disappear once Docker is allowed")
 	}
 }

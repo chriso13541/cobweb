@@ -145,6 +145,17 @@ type Config struct {
 	FirewallEnabled bool       `json:"firewall_enabled"`
 	PortRules       []PortRule `json:"port_rules"`
 
+	// Docker coexistence (only meaningful while the firewall is enabled).
+	// DockerEnabled lets containers through cobweb's firewall: trusted for
+	// traffic to the router and out to the LANs/WAN, with only *published*
+	// (DNAT'd) ports reachable from outside. DockerInterfaces lists the
+	// bridge names to trust (a trailing * is a wildcard); empty means
+	// docker0 and br-*. DockerWANSource optionally limits who on the WAN
+	// side may reach published ports (an IPv4 address or CIDR).
+	DockerEnabled    bool     `json:"docker_enabled"`
+	DockerInterfaces []string `json:"docker_interfaces"`
+	DockerWANSource  string   `json:"docker_wan_source,omitempty"`
+
 	// Dashboard
 	ListenAddr string `json:"listen_addr"`
 
@@ -227,6 +238,7 @@ func Default(path string) *Config {
 		UpstreamServers:   []string{"1.1.1.1:53", "9.9.9.9:53"},
 		ListenAddr:        "0.0.0.0:8070",
 		PortRules:         []PortRule{},
+		DockerInterfaces:  []string{},
 		Reservations:      []Reservation{},
 		DNSRecords:        []DNSRecord{},
 		Leases:            []Lease{},
@@ -468,6 +480,12 @@ func (c *Config) ImportJSON(data []byte) error {
 	c.SQMDownloadMbit = parsed.SQMDownloadMbit
 	c.SQMUploadMbit = parsed.SQMUploadMbit
 	c.FirewallEnabled = parsed.FirewallEnabled
+	c.DockerEnabled = parsed.DockerEnabled
+	c.DockerInterfaces = parsed.DockerInterfaces
+	if c.DockerInterfaces == nil {
+		c.DockerInterfaces = []string{}
+	}
+	c.DockerWANSource = parsed.DockerWANSource
 	c.PortRules = parsed.PortRules
 	if c.PortRules == nil {
 		c.PortRules = []PortRule{} // older exports predate this field
@@ -501,6 +519,9 @@ type Snapshot struct {
 	SQMUploadMbit     int
 	FirewallEnabled   bool
 	PortRules         []PortRule
+	DockerEnabled     bool
+	DockerInterfaces  []string
+	DockerWANSource   string
 	ListenAddr        string
 	Reservations      []Reservation
 	DNSRecords        []DNSRecord
@@ -526,6 +547,9 @@ func (c *Config) Snapshot() Snapshot {
 		SQMUploadMbit:     c.SQMUploadMbit,
 		FirewallEnabled:   c.FirewallEnabled,
 		PortRules:         append([]PortRule{}, c.PortRules...),
+		DockerEnabled:     c.DockerEnabled,
+		DockerInterfaces:  append([]string{}, c.DockerInterfaces...),
+		DockerWANSource:   c.DockerWANSource,
 		ListenAddr:        c.ListenAddr,
 		Reservations:      append([]Reservation{}, c.Reservations...),
 		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
@@ -853,6 +877,17 @@ func newRuleID() string {
 		return "rule-fallback"
 	}
 	return "rule-" + hex.EncodeToString(b)
+}
+
+// SetDocker persists the Docker coexistence settings. Like the other
+// firewall setters it only stores; the caller validates and applies.
+func (c *Config) SetDocker(enabled bool, interfaces []string, wanSource string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.DockerEnabled = enabled
+	c.DockerInterfaces = append([]string{}, interfaces...)
+	c.DockerWANSource = wanSource
+	return c.saveLocked()
 }
 
 // SetFirewallEnabled persists the master firewall switch. Like

@@ -24,6 +24,7 @@
 package firewall
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -45,6 +46,82 @@ const (
 // interface name: no quotes, backslashes, whitespace or anything else
 // that could break out of the quoted string it's written into.
 var ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
+
+// dockerIfaceRe allows an interface name or a prefix wildcard ("br-*").
+// Same character restrictions as ifaceRe, so nothing can break out of the
+// quoted string it's written into; the * may only be the final character,
+// and must follow at least one character (a bare "*" would match everything,
+// including the WAN).
+var dockerIfaceRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,14}\*?$`)
+
+// DefaultDockerInterfaces are the bridge names Docker creates: docker0 for
+// the default network and br-<id> for user-defined and compose networks.
+var DefaultDockerInterfaces = []string{"docker0", "br-*"}
+
+// ifaceMatches reports whether an interface name satisfies a name-or-prefix
+// pattern as nftables' iifname/oifname would.
+func ifaceMatches(pattern, name string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(name, strings.TrimSuffix(pattern, "*"))
+	}
+	return pattern == name
+}
+
+// patternsOverlap reports whether any interface name could satisfy both
+// patterns - for two prefix patterns, one prefix must start with the other.
+func patternsOverlap(a, b string) bool {
+	aw, bw := strings.HasSuffix(a, "*"), strings.HasSuffix(b, "*")
+	ap, bp := strings.TrimSuffix(a, "*"), strings.TrimSuffix(b, "*")
+	switch {
+	case aw && bw:
+		return strings.HasPrefix(ap, bp) || strings.HasPrefix(bp, ap)
+	case aw:
+		return strings.HasPrefix(b, ap)
+	case bw:
+		return strings.HasPrefix(a, bp)
+	}
+	return a == b
+}
+
+// DockerInterfaces returns the validated bridge patterns that will be
+// trusted, applying the defaults when none are configured. It refuses
+// anything that could match the WAN, a LAN segment or loopback: trusting
+// those by accident would silently turn the firewall off for them.
+func DockerInterfaces(snap config.Snapshot) ([]string, error) {
+	wan := strings.TrimSpace(snap.WANInterface)
+	var reserved []string
+	reserved = append(reserved, wan, "lo")
+	for _, seg := range snap.LANSegments {
+		reserved = append(reserved, strings.TrimSpace(seg.Interface))
+	}
+
+	in := snap.DockerInterfaces
+	if len(in) == 0 {
+		in = DefaultDockerInterfaces
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, raw := range in {
+		pat := strings.TrimSpace(raw)
+		if pat == "" || seen[pat] {
+			continue
+		}
+		if !dockerIfaceRe.MatchString(pat) {
+			return nil, fmt.Errorf("docker interface %q isn't valid: use an interface name like docker0, optionally ending in * (e.g. br-*)", raw)
+		}
+		for _, r := range reserved {
+			if r != "" && patternsOverlap(pat, r) {
+				return nil, fmt.Errorf("docker interface %q would also match %q, which is the WAN, a LAN segment or loopback, and must never be trusted as a Docker bridge", pat, r)
+			}
+		}
+		seen[pat] = true
+		out = append(out, pat)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no docker interfaces configured")
+	}
+	return out, nil
+}
 
 // runFn is a seam for tests: production code pipes the ruleset to the
 // real nft binary on stdin.
@@ -318,6 +395,22 @@ func Render(snap config.Snapshot) (string, error) {
 	}
 	lanSet := quoteList(lans)
 
+	var docker []string
+	dockerSrc := ""
+	if snap.DockerEnabled {
+		var err error
+		if docker, err = DockerInterfaces(snap); err != nil {
+			return "", fmt.Errorf("firewall: %w", err)
+		}
+		if src := strings.TrimSpace(snap.DockerWANSource); src != "" {
+			parsed, err := parseSource(src)
+			if err != nil {
+				return "", fmt.Errorf("firewall: docker source: %w", err)
+			}
+			dockerSrc = "ip saddr " + parsed + " "
+		}
+	}
+
 	var inputRules, forwardRules, dnatRules []string
 	for _, r := range snap.PortRules {
 		if r.Disabled {
@@ -377,6 +470,9 @@ func Render(snap config.Snapshot) (string, error) {
 	w("        meta l4proto { 1, 58 } accept")
 	w("        # Everything on a LAN segment may talk to the router itself (DHCP, DNS, dashboard, SSH).")
 	w("        iifname %s accept", lanSet)
+	for _, d := range docker {
+		w(`        iifname "%s" accept comment "docker: containers may talk to the router"`, d)
+	}
 	for _, r := range inputRules {
 		w("        %s", r)
 	}
@@ -388,6 +484,18 @@ func Render(snap config.Snapshot) (string, error) {
 	w("        # LAN segments route freely between each other and out to the WAN.")
 	w("        iifname %s oifname %s accept", lanSet, lanSet)
 	w(`        iifname %s oifname "%s" accept`, lanSet, wan)
+	if len(docker) > 0 {
+		w("        # Docker: containers reach each other, the LANs and the WAN. Only published (DNAT'd)")
+		w("        # ports are reachable from outside, never a container's internal address directly.")
+		w("        # Docker's own tables still enforce their per-network isolation on top of this.")
+		for _, d := range docker {
+			w(`        iifname "%s" oifname "%s" accept`, d, d)
+			w(`        iifname "%s" oifname %s accept`, d, lanSet)
+			w(`        iifname "%s" oifname "%s" accept`, d, wan)
+			w(`        iifname %s oifname "%s" ct status dnat accept`, lanSet, d)
+			w(`        iifname "%s" oifname "%s" %sct status dnat accept`, wan, d, dockerSrc)
+		}
+	}
 	for _, r := range forwardRules {
 		w("        %s", r)
 	}
@@ -438,6 +546,10 @@ func Warnings(snap config.Snapshot) []string {
 		out = append(out, "No rule allows SSH (tcp 22) from the WAN side. If you administer this box over the house network (e.g. through a bastion host), add an \"input\" rule for tcp 22 before enabling the firewall, or you'll lock yourself out. Access from the LAN segments is never blocked.")
 	}
 
+	if snap.DockerEnabled && strings.TrimSpace(snap.DockerWANSource) == "" {
+		out = append(out, "Docker is allowed through, and its published ports are reachable from any address on the WAN side. If that network is reachable from the internet, set a Docker source (for example your reverse proxy's address) to limit who can use them.")
+	}
+
 	for _, r := range snap.PortRules {
 		if r.Disabled || strings.TrimSpace(r.Source) != "" {
 			continue
@@ -474,6 +586,98 @@ func ForeignTables() []string {
 		foreign = append(foreign, name)
 	}
 	return foreign
+}
+
+// Environment describes what other firewalls on this machine are doing
+// that cobweb cannot override.
+type Environment struct {
+	// ForwardDrops lists other tables' base chains at the forward hook whose
+	// policy is drop, as "family table chain". A forwarded packet must be
+	// accepted by every such chain, so each can block routing even when
+	// cobweb accepts the packet. (An old hand-written ruleset that also
+	// accepts what it should is a legitimate reason for one to exist.)
+	ForwardDrops []string
+	// DockerDetected is true if another table looks like Docker's: it has
+	// DOCKER* chains (iptables-nft) or is named docker* (Docker's own
+	// nftables backend).
+	DockerDetected bool
+	// DockerForwardDrops is the subset of ForwardDrops that live in a Docker
+	// table. That one is never intentional on a router: it is Docker's
+	// default when it turns IP forwarding on itself, and it silently cuts off
+	// every LAN segment. "ip-forward-no-drop": true in daemon.json prevents it.
+	DockerForwardDrops []string
+}
+
+// DetectEnvironment inspects the live nftables ruleset (including rules
+// that iptables-nft created, which is how Docker installs its own). Returns
+// the zero value if nft is unavailable.
+func DetectEnvironment() Environment {
+	out, err := outputFn("nft", "-j", "list", "chains")
+	if err != nil {
+		return Environment{}
+	}
+	return parseEnvironment(out)
+}
+
+func parseEnvironment(jsonOut string) Environment {
+	var doc struct {
+		Nftables []struct {
+			Chain *struct {
+				Family string `json:"family"`
+				Table  string `json:"table"`
+				Name   string `json:"name"`
+				Hook   string `json:"hook"`
+				Policy string `json:"policy"`
+			} `json:"chain"`
+		} `json:"nftables"`
+	}
+	var env Environment
+	if err := json.Unmarshal([]byte(jsonOut), &doc); err != nil {
+		return env
+	}
+
+	key := func(family, table string) string { return family + " " + table }
+	isOurs := func(k string) bool { return k == filterTable || k == natTable }
+
+	dockerTables := map[string]bool{}
+	for _, item := range doc.Nftables {
+		c := item.Chain
+		if c == nil || isOurs(key(c.Family, c.Table)) {
+			continue
+		}
+		if strings.HasPrefix(c.Name, "DOCKER") || strings.HasPrefix(strings.ToLower(c.Table), "docker") {
+			dockerTables[key(c.Family, c.Table)] = true
+			env.DockerDetected = true
+		}
+	}
+	for _, item := range doc.Nftables {
+		c := item.Chain
+		if c == nil || isOurs(key(c.Family, c.Table)) {
+			continue
+		}
+		if c.Hook == "forward" && c.Policy == "drop" {
+			label := key(c.Family, c.Table) + " " + c.Name
+			env.ForwardDrops = append(env.ForwardDrops, label)
+			if dockerTables[key(c.Family, c.Table)] {
+				env.DockerForwardDrops = append(env.DockerForwardDrops, label)
+			}
+		}
+	}
+	return env
+}
+
+// ValidateDocker checks the Docker settings in snap whether or not Docker is
+// currently enabled, so they can be rejected before they are saved.
+func ValidateDocker(snap config.Snapshot) error {
+	if _, err := DockerInterfaces(snap); err != nil {
+		return err
+	}
+	if src := strings.TrimSpace(snap.DockerWANSource); src != "" {
+		if _, err := parseSource(src); err != nil {
+			return fmt.Errorf("docker source: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- applying ---

@@ -376,6 +376,16 @@
       {{if .FirewallError}}<div class="flash flash-error">{{.FirewallError}}</div>{{end}}
       {{if .FirewallSuccess}}<div class="flash flash-ok">{{.FirewallSuccess}}</div>{{end}}
       {{range .FirewallWarnings}}<div class="flash flash-warn">{{.}}</div>{{end}}
+      {{if .Env.DockerForwardDrops}}
+        <div class="flash flash-error">
+          <strong>Docker is cutting off forwarded traffic.</strong> Docker's own firewall table has a chain that drops forwarded packets by default
+          (<strong>{{join .Env.DockerForwardDrops ", "}}</strong>). Because every table must accept a packet, this blocks the LAN segments'
+          internet access no matter what cobweb allows, and cobweb can't override it. Docker only does this when it has to switch IP forwarding on
+          itself, so it can come and go with boot order. Fix it once and for all: put
+          <code>{ "ip-forward-no-drop": true }</code> in <code>/etc/docker/daemon.json</code> and run <code>sudo systemctl restart docker</code>.
+          Docker still blocks unpublished container ports with its own rules.
+        </div>
+      {{end}}
       {{if .ForeignTables}}
         <div class="flash flash-warn">
           {{if .FirewallEnabled}}These other nftables tables are still loaded and are evaluated alongside cobweb's:{{else}}Before enabling, retire your existing nftables ruleset. These tables are loaded right now:{{end}}
@@ -455,6 +465,38 @@
         <label>Source (optional)</label>
         <input type="text" name="source" placeholder="192.168.1.0/24 or a single IP - blank means anywhere on the WAN side">
         <p class="hint">Only IPv4. A forward's target must be inside one of the LAN segments above, and a port range keeps its ports (it can't be remapped).</p>
+      </form>
+
+      <h2 id="docker" style="margin-top:30px;">Docker containers</h2>
+      <p class="desc">
+        Running Docker on this box? Turn this on and cobweb will let the Docker bridges through its firewall: containers can reach the internet,
+        the LAN segments and this box (e.g. the DNS server), and a <em>published</em> port (<code>-p 8080:80</code>) is reachable from the LAN
+        segments and from the WAN side. A container's own address is never reachable directly, only what you publish. Docker's own rules still
+        keep its separate networks isolated. Off by default, and it only matters while the firewall above is on.
+      </p>
+      {{if and .Env.DockerDetected (not .DockerEnabled) .FirewallEnabled}}
+        <div class="flash flash-warn">Docker is installed, but this is off, so containers currently have no network through cobweb's firewall.</div>
+      {{end}}
+      <form method="post" action="/api/firewall/docker">
+        <div class="grid3">
+          <div>
+            <label>Let Docker through</label>
+            <select name="docker_enabled">
+              <option value="0" {{if not .DockerEnabled}}selected{{end}}>Off</option>
+              <option value="1" {{if .DockerEnabled}}selected{{end}}>On</option>
+            </select>
+          </div>
+          <div>
+            <label>Bridge interfaces (optional)</label>
+            <input type="text" name="docker_interfaces" value="{{.DockerIfaceText}}" placeholder="docker0, br-*">
+          </div>
+          <div>
+            <label>Published ports reachable from (optional)</label>
+            <input type="text" name="docker_wan_source" value="{{.DockerWANSource}}" placeholder="e.g. your reverse proxy's IP">
+          </div>
+          <div style="padding-top:22px;"><button type="submit">Save</button></div>
+        </div>
+        <p class="hint">Blank interfaces means <code>docker0</code> and <code>br-*</code> (a trailing <code>*</code> matches any ending). Names that would also match the WAN or a LAN interface are refused. The source limits who on the WAN side may reach published ports - an IPv4 address or CIDR; blank means any host on the WAN-side network.</p>
       </form>
 
       <details style="margin-top:6px;">

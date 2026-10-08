@@ -37,6 +37,10 @@ type Server struct {
 	// applyFirewall pushes a config snapshot to the kernel. It's a field
 	// so tests can substitute it rather than shelling out to a real nft.
 	applyFirewall func(config.Snapshot) error
+
+	// detectEnv reports what other firewalls on the box are doing; also a
+	// field so tests don't depend on whatever nftables the host has loaded.
+	detectEnv func() firewall.Environment
 }
 
 //go:embed templates/*.html
@@ -62,6 +66,7 @@ func New(cfg *config.Config, creds *auth.Store) (*Server, error) {
 		throttle: auth.NewLoginThrottle(),
 
 		applyFirewall: firewall.Apply,
+		detectEnv:     firewall.DetectEnvironment,
 	}, nil
 }
 
@@ -100,6 +105,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/firewall/rules/add", s.mutating(s.handleFirewallAddRule))
 	mux.HandleFunc("/api/firewall/rules/remove", s.mutating(s.handleFirewallRemoveRule))
 	mux.HandleFunc("/api/firewall/rules/toggle", s.mutating(s.handleFirewallToggleRule))
+	mux.HandleFunc("/api/firewall/docker", s.mutating(s.handleFirewallDocker))
 	mux.HandleFunc("/api/segments/add", s.mutating(s.handleAddLANSegment))
 	mux.HandleFunc("/api/segments/update", s.mutating(s.handleUpdateLANSegment))
 	mux.HandleFunc("/api/segments/remove", s.mutating(s.handleRemoveLANSegment))
@@ -238,6 +244,8 @@ type settingsData struct {
 	FirewallPreviewErr string
 	FirewallWarnings   []string
 	ForeignTables      []string
+	Env                firewall.Environment // other firewalls cobweb can't override (Docker's drop policy, ...)
+	DockerIfaceText    string               // the bridge patterns in effect, comma-separated, for the form
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +318,10 @@ func (s *Server) buildSettingsData(accountErr, accountOK string) settingsData {
 		AccountSuccess:   accountOK,
 		FirewallWarnings: firewall.Warnings(snap),
 		ForeignTables:    firewall.ForeignTables(),
+		Env:              s.detectEnv(),
+	}
+	if ifaces := snap.DockerInterfaces; len(ifaces) > 0 {
+		data.DockerIfaceText = strings.Join(ifaces, ", ")
 	}
 	if preview, err := firewall.Render(snap); err != nil {
 		data.FirewallPreviewErr = err.Error()

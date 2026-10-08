@@ -240,6 +240,9 @@ You generally shouldn't need to hand-edit it — the dashboard's
   "listen_addr": "0.0.0.0:8070",
   "firewall_enabled": false,
   "port_rules": [],
+  "docker_enabled": false,
+  "docker_interfaces": [],
+  "docker_wan_source": "",
   "reservations": [
     {"mac": "08:62:66:a1:25:44", "ip": "192.168.2.10", "hostname": "stronghold", "segment_id": "seg-a1b2c3d4e5f6"}
   ],
@@ -467,6 +470,75 @@ cobweb applies the saved ruleset when it starts. With the old
 `nftables` service disabled, there's a window of a few seconds at boot
 before cobweb is up where nothing filters - fine behind another NAT, but
 worth knowing.
+
+### Running Docker on this box
+
+Docker installs its own firewall tables, and two separate things can go
+wrong next to a router. cobweb handles the second; the first needs one
+line in Docker's config.
+
+**1. Docker can cut off your LAN segments, with or without cobweb's
+firewall.** Docker's documentation says that when it sets its default
+forwarding policy to drop, "it will prevent your Docker host from acting
+as a router", and that it does so when it has to switch IP forwarding on
+itself (Docker 28's release post: "if Docker had to enable IP forwarding,
+it would set DROP by default"). That chain is a separate table, and a
+forwarded packet must be accepted by every table, so cobweb can't
+override it. Whether it happens can depend on whether forwarding is
+already on when Docker starts, i.e. on boot order. Make it deterministic
+**before you first start Docker** (`/etc/docker/daemon.json`):
+
+```json
+{ "ip-forward-no-drop": true }
+```
+
+then `sudo systemctl restart docker`. Docker still blocks unpublished
+container ports with its own rules. Check it took:
+`sudo iptables -S FORWARD | head -1` should print `-P FORWARD ACCEPT`.
+(The option is documented for Docker Engine 28; on an older engine check
+`dockerd --help | grep ip-forward-no-drop`.) The settings page shows a red
+banner naming the chain whenever it sees a Docker table dropping
+forwarded packets.
+
+**2. cobweb's own firewall drops container traffic**, because the
+Docker bridges aren't LAN segments. Turn on **Settings → Firewall →
+Docker containers → Let Docker through** (`"docker_enabled": true`):
+
+| Traffic | Result |
+|---|---|
+| Container → this box (e.g. the DNS server on the bridge gateway) | allowed |
+| Container → internet, WAN-side network, LAN segments | allowed |
+| LAN segment → a *published* port (`-p 8080:80`) | allowed |
+| WAN side → a *published* port | allowed, or only from `docker_wan_source` if set |
+| Anything → a container's own address (unpublished port) | dropped |
+| Container ↔ container on the same network | allowed; Docker's own rules still isolate different networks |
+
+Only the Docker bridges are trusted: `docker0` and `br-*` by default,
+or the names in `docker_interfaces` (a trailing `*` is a wildcard).
+cobweb refuses any pattern that could also match the WAN interface, a
+LAN interface or `lo`, since trusting those by accident would quietly
+switch the firewall off for them. If your WAN or LAN interface is itself
+called `br-something`, list your real Docker bridges explicitly.
+
+Since the house network is reachable from the internet, **set
+`docker_wan_source`** to the one host that should reach your
+containers - e.g. the reverse proxy's address - and give this box a
+DHCP reservation on the main router so its WAN-side address stays put.
+Docker publishes on all addresses by default; `-p 192.168.2.1:8080:80`
+publishes on the room side only.
+
+Other things worth knowing:
+
+- Debian's stock `/etc/nftables.conf` starts with `flush ruleset`. If
+  that service is enabled and reloaded after Docker starts, it deletes
+  Docker's tables and containers lose networking until Docker is
+  restarted. cobweb never does this - it only replaces its own two
+  tables - so retire that file as described above.
+- `network_mode: host` containers use the host's network stack, so they
+  need an `input` rule like any other service on this box. `macvlan` and
+  `ipvlan` networks get no Docker firewall rules at all.
+- cobweb doesn't manage Docker's tables; it just stops standing in
+  their way.
 
 ## Traffic shaping (Smart Queue Management)
 
