@@ -17,6 +17,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,12 +32,26 @@ type Server struct {
 	cfg       *config.Config
 	segmentID string
 	conn      *net.UDPConn
+
+	// Addresses a client DECLINEd (it found them already in use), mapped to
+	// when the quarantine ends. Not persisted: a restart forgets them, and
+	// the client will simply decline again if the conflict is still there.
+	mu       sync.Mutex
+	declined map[string]time.Time
+
+	sendFn func([]byte) // test seam: capture replies instead of broadcasting them
 }
+
+// declineQuarantine is how long a declined address stays out of the pool.
+const declineQuarantine = 10 * time.Minute
+
+// slowHandleWarn is the handling time above which a packet is logged as slow.
+const slowHandleWarn = 100 * time.Millisecond
 
 // New creates a DHCP server for one specific LAN segment. It does not
 // start listening until Run is called.
 func New(cfg *config.Config, segmentID string) *Server {
-	return &Server{cfg: cfg, segmentID: segmentID}
+	return &Server{cfg: cfg, segmentID: segmentID, declined: map[string]time.Time{}}
 }
 
 // segment looks up this server's current segment definition fresh from
@@ -185,19 +200,66 @@ func listenUDPReusePort(port int) (*net.UDPConn, error) {
 }
 
 func (s *Server) handle(pkt *Packet) {
+	start := time.Now()
 	switch pkt.MessageType {
 	case Discover:
 		s.handleDiscover(pkt)
 	case Request:
 		s.handleRequest(pkt)
+	case Decline:
+		s.handleDecline(pkt)
 	case Release:
-		// Leases naturally expire; explicit RELEASE handling can be
-		// added later if a client's early-release behavior matters.
+		// Leases naturally expire; keeping the record also means the
+		// device gets the same address back when it returns.
+		log.Printf("dhcp: RELEASE from %s (%s)", pkt.CHAddr, pkt.CIAddr)
 	}
+	if d := time.Since(start); d > slowHandleWarn {
+		log.Printf("dhcp: SLOW: handling %d from %s took %v", pkt.MessageType, pkt.CHAddr, d.Round(time.Millisecond))
+	}
+}
+
+// handleDecline processes a client reporting that the address it was given
+// is already in use on the wire (it ARP-probed it and got an answer). Without
+// this, the pool scan would offer the very same address again, the client
+// would decline again, and each round trip costs it a multi-second back-off.
+func (s *Server) handleDecline(pkt *Packet) {
+	mac := pkt.CHAddr.String()
+	if pkt.ServerID != nil {
+		if sid, err := s.serverIP(); err == nil && !pkt.ServerID.Equal(sid) {
+			return // declining another server's offer
+		}
+	}
+	if pkt.RequestedIP == nil {
+		return
+	}
+	ip := pkt.RequestedIP.String()
+	log.Printf("dhcp: DECLINE from %s for %s - address is in use by another device; keeping it out of the pool for %s", mac, ip, declineQuarantine)
+	if r, ok := s.cfg.ReservationForMAC(mac); ok && r.IP == ip {
+		log.Printf("dhcp: WARNING: %s declined its RESERVED address %s; another device is using it, so this client cannot get its reservation until that is fixed", mac, ip)
+	}
+	s.mu.Lock()
+	s.declined[ip] = time.Now().Add(declineQuarantine)
+	s.mu.Unlock()
+}
+
+// isDeclined reports whether ip is in the post-DECLINE quarantine.
+func (s *Server) isDeclined(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.declined[ip]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(s.declined, ip)
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleDiscover(pkt *Packet) {
 	mac := pkt.CHAddr.String()
+	log.Printf("dhcp: DISCOVER from %s xid=%x (%s)", mac, pkt.XID, pkt.Hostname)
 	ip, err := s.allocate(mac, pkt.Hostname, pkt.RequestedIP)
 	if err != nil {
 		log.Printf("dhcp: no address available for %s: %v", mac, err)
@@ -216,6 +278,16 @@ func (s *Server) handleDiscover(pkt *Packet) {
 func (s *Server) handleRequest(pkt *Packet) {
 	mac := pkt.CHAddr.String()
 
+	// A REQUEST carrying a server identifier is the client's answer to
+	// someone's OFFER (RFC 2131 4.3.2). If it chose a different server, this
+	// one must stay silent - replying anyway would hand the client a second,
+	// conflicting answer.
+	if pkt.ServerID != nil {
+		if sid, err := s.serverIP(); err == nil && !pkt.ServerID.Equal(sid) {
+			return
+		}
+	}
+
 	// Determine what IP we're confirming: either the client's requested
 	// IP (initial REQUEST after an OFFER), or its current CIAddr (a
 	// renewal from a client that already has a lease).
@@ -226,7 +298,24 @@ func (s *Server) handleRequest(pkt *Packet) {
 		wantIP = pkt.CIAddr
 	}
 
+	state := "selecting"
+	switch {
+	case pkt.ServerID == nil && pkt.CIAddr.Equal(net.IPv4zero):
+		state = "init-reboot"
+	case pkt.ServerID == nil:
+		state = "renewing"
+	}
+	log.Printf("dhcp: REQUEST from %s xid=%x for %v (%s, %s)", mac, pkt.XID, wantIP, state, pkt.Hostname)
+
 	ip, err := s.allocate(mac, pkt.Hostname, wantIP)
+	if err == nil && wantIP != nil && !ip.Equal(wantIP) {
+		// The client wants an address we are not going to give it (its old
+		// lease from another network, a changed reservation, an address that
+		// is now taken). The protocol answer is a NAK, which makes the client
+		// drop it and start over at once. Quietly ACKing a different address
+		// instead leaves many clients waiting out their own retry timers.
+		err = fmt.Errorf("%s is not available to this client (it would get %s)", wantIP, ip)
+	}
 	if err != nil {
 		log.Printf("dhcp: NAK for %s: %v", mac, err)
 		serverID, sErr := s.serverIP()
@@ -326,7 +415,7 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 	}
 	arpTaken := arpTakenIPs(seg.Interface, mac)
 
-	if requested != nil && s.inPool(requested) && !s.cfg.IPInUse(requested.String(), mac) && !arpTaken[requested.String()] {
+	if requested != nil && s.inPool(requested) && !s.cfg.IPInUse(requested.String(), mac) && !arpTaken[requested.String()] && !s.isDeclined(requested.String()) {
 		return requested, nil
 	}
 
@@ -344,6 +433,9 @@ func (s *Server) allocate(mac, hostname string, requested net.IP) (net.IP, error
 		}
 		if arpTaken[candidate] {
 			continue // claimed by a device outside cobweb's own DHCP records - e.g. a manually assigned static IP
+		}
+		if s.isDeclined(candidate) {
+			continue // a client found it in use on the wire (DECLINE)
 		}
 		return ip, nil
 	}
@@ -393,6 +485,10 @@ func (s *Server) serverIP() (net.IP, error) {
 // SO_BINDTODEVICE in Run, this guarantees the reply goes out this
 // segment's interface only.
 func (s *Server) send(b []byte) {
+	if s.sendFn != nil {
+		s.sendFn(b)
+		return
+	}
 	seg, err := s.segment()
 	if err != nil {
 		log.Printf("dhcp: send: %v", err)

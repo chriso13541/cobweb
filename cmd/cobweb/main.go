@@ -12,7 +12,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"cobweb/internal/auth"
@@ -130,6 +132,20 @@ func main() {
 			log.Printf("firewall: applied %d port rule(s)", len(startupSnap.PortRules))
 		}
 	}
+
+	// Lease and discovered-device changes are written to disk a moment after
+	// they happen (see config.Flush); make sure a stop or restart - including
+	// update.sh's - doesn't lose the last second of them.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		log.Printf("cobweb: %v received, saving config and exiting", sig)
+		if err := cfg.Flush(); err != nil {
+			log.Printf("cobweb: final config save failed: %v", err)
+		}
+		os.Exit(0)
+	}()
 
 	webSrv, err := web.New(cfg, credStore)
 	if err != nil {

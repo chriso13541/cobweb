@@ -12,9 +12,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // LANSegment is one routed LAN - in practice, usually one VLAN with its
@@ -154,7 +157,24 @@ type Config struct {
 
 	path string       // where this config was loaded from / saves to
 	mu   sync.RWMutex // guards all fields above during concurrent access
+
+	// Persistence bookkeeping. Settings edits save synchronously (see
+	// saveLocked); the two high-frequency updates - DHCP lease records and
+	// ARP-discovered devices - only mark the config dirty and let a
+	// background flusher write it, so a slow disk can never stall a DHCP
+	// lookup that is waiting on mu.
+	fileMu      sync.Mutex    // serialises writes to path (never held while waiting for mu)
+	lastWritten uint64        // seq of the newest snapshot on disk; guarded by fileMu
+	seq         atomic.Uint64 // snapshot sequence, assigned while mu is held
+	mutGen      atomic.Uint64 // bumped by every deferred (hot-path) mutation
+	flushedGen  atomic.Uint64 // mutGen value covered by what is on disk
+	flushOnce   sync.Once
+	kick        chan struct{}
 }
+
+// flushDelay is how long the background flusher waits after the first
+// deferred change so a burst (a whole room booting at once) is one write.
+const flushDelay = time.Second
 
 // legacyFields captures the pre-VLAN single-LAN shape, used only to
 // migrate an old config.json (which has these keys at the top level
@@ -290,19 +310,115 @@ func (c *Config) Save() error {
 	return c.saveLocked()
 }
 
-// saveLocked writes to disk assuming the caller already holds a lock.
+// writeFileHook is a seam so tests can simulate a slow or busy disk. It is
+// atomic because the background flusher reads it while tests swap it.
+var writeFileHook atomic.Pointer[func(string, []byte, os.FileMode) error]
+
+func writeFileFn(name string, b []byte, perm os.FileMode) error {
+	if f := writeFileHook.Load(); f != nil {
+		return (*f)(name, b, perm)
+	}
+	return os.WriteFile(name, b, perm)
+}
+
+// saveLocked persists the whole config synchronously. The caller holds
+// c.mu for writing (or exclusively owns c, as in Load). Used for settings
+// edits, which are rare and should be on disk when the request returns.
 func (c *Config) saveLocked() error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
+	seq := c.seq.Add(1)
+	gen := c.mutGen.Load() // stable: deferred mutations need the lock we hold
+	if err := c.writeSnapshot(b, seq); err != nil {
+		return err
+	}
+	// This snapshot includes every deferred change made so far.
+	c.advanceFlushed(gen)
+	return nil
+}
+
+// writeSnapshot writes one marshalled snapshot via temp file + rename. It
+// is a no-op if a newer snapshot has already been written, so a slow
+// background flush can never overwrite fresher data.
+func (c *Config) writeSnapshot(b []byte, seq uint64) error {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	if seq < c.lastWritten {
+		return nil
+	}
 	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0640); err != nil {
+	if err := writeFileFn(tmp, b, 0640); err != nil {
 		return fmt.Errorf("write temp config: %w", err)
 	}
 	// Atomic rename so a crash mid-write never leaves a half-written
 	// config file that fails to parse on next boot.
-	return os.Rename(tmp, c.path)
+	if err := os.Rename(tmp, c.path); err != nil {
+		return err
+	}
+	c.lastWritten = seq
+	return nil
+}
+
+func (c *Config) advanceFlushed(gen uint64) {
+	for {
+		cur := c.flushedGen.Load()
+		if gen <= cur || c.flushedGen.CompareAndSwap(cur, gen) {
+			return
+		}
+	}
+}
+
+// markDirtyLocked records a deferred change (c.mu held for writing) and
+// wakes the background flusher. It does no I/O.
+func (c *Config) markDirtyLocked() {
+	c.mutGen.Add(1)
+	c.flushOnce.Do(func() {
+		c.kick = make(chan struct{}, 1)
+		go c.flusher()
+	})
+	select {
+	case c.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Config) flusher() {
+	for range c.kick {
+		time.Sleep(flushDelay)
+		if err := c.Flush(); err != nil {
+			log.Printf("config: background save failed (will retry): %v", err)
+			time.Sleep(5 * time.Second)
+			select {
+			case c.kick <- struct{}{}:
+			default:
+			}
+		}
+	}
+}
+
+// Flush writes out any deferred changes now. The marshal happens under a
+// read lock (memory only); the disk write happens with no config lock held.
+// Call it before the process exits.
+func (c *Config) Flush() error {
+	c.mu.RLock()
+	gen := c.mutGen.Load()
+	if gen == c.flushedGen.Load() {
+		c.mu.RUnlock()
+		return nil
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	seq := c.seq.Add(1)
+	c.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := c.writeSnapshot(b, seq); err != nil {
+		return err
+	}
+	c.advanceFlushed(gen)
+	return nil
 }
 
 // ExportJSON returns the config's current on-disk representation -
@@ -579,19 +695,24 @@ func (c *Config) RemoveDNSRecord(name string) error {
 	return c.saveLocked()
 }
 
-// UpsertLease records or refreshes a dynamic lease and persists it. This
-// is called by the DHCP server on every ACK so leases survive a restart.
+// UpsertLease records or refreshes a dynamic lease. This is called by the
+// DHCP server on every ACK so leases survive a restart. It updates memory
+// and returns immediately; the file is written by the background flusher
+// about a second later (and by Flush on shutdown), so DHCP never waits on
+// the disk.
 func (c *Config) UpsertLease(l Lease) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, existing := range c.Leases {
 		if existing.MAC == l.MAC {
 			c.Leases[i] = l
-			return c.saveLocked()
+			c.markDirtyLocked()
+			return nil
 		}
 	}
 	c.Leases = append(c.Leases, l)
-	return c.saveLocked()
+	c.markDirtyLocked()
+	return nil
 }
 
 // LeaseForMAC returns the current dynamic lease for a MAC, if any.
@@ -636,13 +757,27 @@ func (c *Config) UpsertDiscoveredDevice(d DiscoveredDevice) error {
 	defer c.mu.Unlock()
 	for i, existing := range c.DiscoveredDevices {
 		if existing.MAC == d.MAC {
+			// The dashboard calls this on every poll for every ARP-only
+			// device. Only touch the record when something real changed or
+			// LastSeen is getting stale, so an open dashboard is not a
+			// steady stream of writes.
+			if existing.IP == d.IP && existing.SegmentID == d.SegmentID &&
+				d.LastSeen-existing.LastSeen < discoveredRefreshSecs {
+				return nil
+			}
 			c.DiscoveredDevices[i] = d
-			return c.saveLocked()
+			c.markDirtyLocked()
+			return nil
 		}
 	}
 	c.DiscoveredDevices = append(c.DiscoveredDevices, d)
-	return c.saveLocked()
+	c.markDirtyLocked()
+	return nil
 }
+
+// discoveredRefreshSecs is how stale a discovered device's LastSeen may get
+// before a poll refreshes it.
+const discoveredRefreshSecs = 300
 
 // RemoveDiscoveredDevice deletes a discovered-device record by MAC.
 // If that device is still actually live on the network, it'll simply

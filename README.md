@@ -13,7 +13,12 @@ files across three different applications.
 
 - **DHCP server** — DISCOVER/OFFER/REQUEST/ACK, a dynamic address pool,
   and static MAC → IP reservations. Implemented directly against the
-  RFC 2131 wire format, no dnsmasq/isc-dhcp-server involved.
+  RFC 2131 wire format, no dnsmasq/isc-dhcp-server involved. A client
+  asking for an address it can't have gets a NAK (so it restarts at
+  once instead of waiting out its retry timer), a DECLINE keeps the
+  conflicting address out of the pool for ten minutes, and every
+  DISCOVER/REQUEST/ACK/NAK is logged (see
+  [DHCP troubleshooting](#dhcp-troubleshooting)).
 - **DNS server** — answers local names (both manually defined records
   and every current DHCP lease's hostname, automatically, under a
   configurable local domain like `.lan`) and transparently forwards
@@ -255,7 +260,53 @@ loaded; nothing needs to be re-entered.
 `leases` is maintained automatically by the DHCP server — dynamic
 clients show up here as they get addresses, and it's what survives a
 restart so devices don't lose their addresses just because cobweb
-restarted.
+restarted. Lease (and ARP-discovered device) changes are written to disk
+about a second after they happen, in one batch, and again when cobweb is
+stopped, so DHCP never waits on the disk; changes you make in Settings are
+saved before the page responds, as before.
+
+## DHCP troubleshooting
+
+If a device takes a long time to get an address (or a PC does at boot),
+find out *where* the time goes before changing anything. cobweb logs
+each step:
+
+```bash
+sudo journalctl -u cobweb -f | grep dhcp
+```
+
+```
+dhcp: DISCOVER from 08:62:66:a1:25:44 xid=1a2b3c4d (stronghold)
+dhcp: OFFER 08:62:66:a1:25:44 -> 192.168.2.10
+dhcp: REQUEST from 08:62:66:a1:25:44 xid=1a2b3c4e for 192.168.2.10 (selecting, stronghold)
+dhcp: ACK 08:62:66:a1:25:44 -> 192.168.2.10 (stronghold)
+```
+
+For the wire's side of the story, capture on the LAN interface:
+
+```bash
+sudo tcpdump -ni enp1s0 -e 'port 67 or port 68'
+```
+
+What you see tells you who is slow:
+
+| What you see | Meaning |
+|---|---|
+| Nothing for ~20 s, *then* a DISCOVER | The delay is before the device even asks: link negotiation, a switch port running spanning tree (a managed switch can hold a new port for 30 s), or the device's own start-up. Compare the time of `journalctl -k \| grep enp1s0` "Link is Up" with the first DISCOVER. Not cobweb. |
+| DISCOVER repeated every few seconds, no OFFER | cobweb isn't seeing it, or has no address to offer (`no address available`). Check the interface name and the firewall. |
+| OFFER sent, but the client keeps sending DISCOVER | The client is rejecting the offer. A `DECLINE` line means it found the address already in use by another device. |
+| `REQUEST ... (init-reboot ...)` followed by `NAK` | The device remembered an address from another network (a laptop moved between rooms). It restarts immediately and gets a fresh one. |
+| `SLOW: handling ... took` | A packet was handled slowly - please report it with the surrounding lines. |
+
+A `DECLINE` for a *reserved* address logs a warning: something else on
+the segment is using that address, and the reservation can't work until
+that's fixed.
+
+Earlier versions rewrote the whole config file, while holding the lock
+DHCP lookups need, every time a lease was granted and on every poll of the
+dashboard's device list. On a slow or spun-down disk that could stall
+address assignment for as long as the write took; that no longer
+happens.
 
 ## VLANs / multiple LAN segments
 
