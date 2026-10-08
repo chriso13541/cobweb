@@ -106,6 +106,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/firewall/rules/remove", s.mutating(s.handleFirewallRemoveRule))
 	mux.HandleFunc("/api/firewall/rules/toggle", s.mutating(s.handleFirewallToggleRule))
 	mux.HandleFunc("/api/firewall/docker", s.mutating(s.handleFirewallDocker))
+	mux.HandleFunc("/api/firewall/trusted", s.mutating(s.handleFirewallTrusted))
 	mux.HandleFunc("/api/segments/add", s.mutating(s.handleAddLANSegment))
 	mux.HandleFunc("/api/segments/update", s.mutating(s.handleUpdateLANSegment))
 	mux.HandleFunc("/api/segments/remove", s.mutating(s.handleRemoveLANSegment))
@@ -246,6 +247,7 @@ type settingsData struct {
 	ForeignTables      []string
 	Env                firewall.Environment // other firewalls cobweb can't override (Docker's drop policy, ...)
 	DockerIfaceText    string               // the bridge patterns in effect, comma-separated, for the form
+	TrustedIfaceText   string               // the trusted (VPN) interfaces, comma-separated, for the form
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +325,7 @@ func (s *Server) buildSettingsData(accountErr, accountOK string) settingsData {
 	if ifaces := snap.DockerInterfaces; len(ifaces) > 0 {
 		data.DockerIfaceText = strings.Join(ifaces, ", ")
 	}
+	data.TrustedIfaceText = strings.Join(snap.TrustedInterfaces, ", ")
 	if preview, err := firewall.Render(snap); err != nil {
 		data.FirewallPreviewErr = err.Error()
 	} else {

@@ -243,6 +243,7 @@ You generally shouldn't need to hand-edit it — the dashboard's
   "docker_enabled": false,
   "docker_interfaces": [],
   "docker_wan_source": "",
+  "trusted_interfaces": [],
   "reservations": [
     {"mac": "08:62:66:a1:25:44", "ip": "192.168.2.10", "hostname": "stronghold", "segment_id": "seg-a1b2c3d4e5f6"}
   ],
@@ -539,6 +540,37 @@ Other things worth knowing:
   `ipvlan` networks get no Docker firewall rules at all.
 - cobweb doesn't manage Docker's tables; it just stops standing in
   their way.
+
+### Running a VPN server (WireGuard) on this box
+
+cobweb doesn't run WireGuard itself - it only makes room for it in the
+firewall. Install WireGuard the normal way (`apt install wireguard`),
+create an interface (say `wg0`, address `10.8.0.1/24` - pick a subnet that
+doesn't clash with any LAN segment), then in the dashboard go to
+**Settings → Firewall → VPN (WireGuard) → Trusted interfaces**, enter
+`wg0` and save (`"trusted_interfaces": ["wg0"]`).
+
+Hosts that arrive through a trusted interface are treated like a LAN
+segment: they can reach this box (dashboard, SSH, SMB, ...), the LAN
+segments, the WAN-side network (their traffic is masqueraded out the WAN
+like any LAN host's) and, if Docker is turned on, published container
+ports. Nothing can start a *new* connection toward a VPN client - only
+replies - so a stolen LAN device can't poke at your phone. A trailing `*`
+matches any ending (`wg*`). Names that would also match the WAN, a LAN
+interface, loopback or a Docker bridge are refused.
+
+To let the tunnel in from outside:
+
+1. Add a Port rule: **Allow to this box**, UDP, port `51820` (or your
+   `ListenPort`), with no source - clients roam, so it can't be limited.
+2. On your main router forward UDP `51820` to this box's WAN address.
+3. `systemctl enable --now wg-quick@wg0`. Don't use `AllowedIPs` wider than
+   you need on the server side (each peer: just its own `10.8.0.x/32`).
+
+Anyone holding a peer's private key gets the same access as a host on
+your LAN, so treat the keys like passwords and remove a peer when a phone
+is lost. On an iPhone, the WireGuard app's *On-Demand* setting can bring
+the tunnel up automatically when you leave your home Wi-Fi.
 
 ## Traffic shaping (Smart Queue Management)
 

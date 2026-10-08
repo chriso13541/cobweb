@@ -91,7 +91,7 @@ func TestMutatingRoutesRejectGET(t *testing.T) {
 		"/api/reservations/quickremove", "/api/leases/quickremove", "/api/discovered/quickremove",
 		"/api/devices/rename", "/api/dns/add", "/api/dns/remove", "/api/network/update",
 		"/api/sqm/update", "/api/firewall/toggle", "/api/firewall/rules/add",
-		"/api/firewall/rules/remove", "/api/firewall/rules/toggle", "/api/firewall/docker", "/api/segments/add",
+		"/api/firewall/rules/remove", "/api/firewall/rules/toggle", "/api/firewall/docker", "/api/firewall/trusted", "/api/segments/add",
 		"/api/segments/update", "/api/segments/remove", "/api/config/import", "/api/account/update",
 	}
 	for _, p := range paths {
@@ -360,5 +360,70 @@ func TestSettingsPageNudgesWhenDockerIsInstalledButNotAllowed(t *testing.T) {
 	_ = srv.cfg.SetDocker(true, nil, "")
 	if body := do(srv, token, http.MethodGet, "/settings", nil).Body.String(); strings.Contains(body, "containers currently have no network") {
 		t.Error("the notice should disappear once Docker is allowed")
+	}
+}
+
+func TestTrustedSettingsSaveApplyAndRender(t *testing.T) {
+	srv, token, applied := newTestServer(t)
+	_ = srv.cfg.SetFirewallEnabled(true)
+	rr := do(srv, token, http.MethodPost, "/api/firewall/trusted", url.Values{"trusted_interfaces": {"wg0, wg1"}})
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "VPN interfaces are now trusted") {
+		t.Fatalf("got %d:\n%s", rr.Code, rr.Body.String())
+	}
+	if got := strings.Join(srv.cfg.Snapshot().TrustedInterfaces, "|"); got != "wg0|wg1" {
+		t.Fatalf("saved %q", got)
+	}
+	if len(*applied) != 1 {
+		t.Fatalf("applies = %d, want 1", len(*applied))
+	}
+	if !strings.Contains(rr.Body.String(), `value="wg0, wg1"`) {
+		t.Fatal("form doesn't show the saved list")
+	}
+	rr = do(srv, token, http.MethodPost, "/api/firewall/trusted", url.Values{"trusted_interfaces": {""}})
+	if !strings.Contains(rr.Body.String(), "No interfaces are trusted") || len(srv.cfg.Snapshot().TrustedInterfaces) != 0 {
+		t.Fatalf("clearing failed:\n%s", rr.Body.String())
+	}
+}
+
+func TestTrustedSettingsWhileFirewallOffAreNotApplied(t *testing.T) {
+	srv, token, applied := newTestServer(t)
+	rr := do(srv, token, http.MethodPost, "/api/firewall/trusted", url.Values{"trusted_interfaces": {"wg0"}})
+	if !strings.Contains(rr.Body.String(), "take effect once the firewall is enabled") || len(*applied) != 0 {
+		t.Fatalf("unexpected:\n%s", rr.Body.String())
+	}
+}
+
+func TestTrustedSettingsRejectDangerousInterfaces(t *testing.T) {
+	for _, bad := range []string{"wl*", "enp*", "*", "lo", `wg0" accept`, "docker0"} {
+		srv, token, applied := newTestServer(t)
+		_ = srv.cfg.SetFirewallEnabled(true)
+		_ = srv.cfg.SetDocker(true, nil, "")
+		before := len(*applied)
+		rr := do(srv, token, http.MethodPost, "/api/firewall/trusted", url.Values{"trusted_interfaces": {bad}})
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%q: got %d, want 400", bad, rr.Code)
+		}
+		if len(srv.cfg.Snapshot().TrustedInterfaces) != 0 || len(*applied) != before {
+			t.Errorf("%q: rejected input was saved or applied", bad)
+		}
+	}
+}
+
+func TestTrustedSettingsRollBackWhenApplyFails(t *testing.T) {
+	srv, token, _ := newTestServer(t)
+	_ = srv.cfg.SetFirewallEnabled(true)
+	srv.applyFirewall = func(config.Snapshot) error { return errors.New("nft said no") }
+	rr := do(srv, token, http.MethodPost, "/api/firewall/trusted", url.Values{"trusted_interfaces": {"wg0"}})
+	if !strings.Contains(rr.Body.String(), "nothing was changed") || len(srv.cfg.Snapshot().TrustedInterfaces) != 0 {
+		t.Fatalf("expected rollback:\n%s", rr.Body.String())
+	}
+}
+
+func TestDockerSettingsCannotOverlapTrusted(t *testing.T) {
+	srv, token, _ := newTestServer(t)
+	_ = srv.cfg.SetTrustedInterfaces([]string{"br-vpn"})
+	rr := do(srv, token, http.MethodPost, "/api/firewall/docker", dockerForm("1", "", ""))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("docker defaults overlapping a trusted interface: got %d, want 400", rr.Code)
 	}
 }

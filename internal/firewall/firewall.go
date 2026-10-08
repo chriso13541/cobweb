@@ -47,12 +47,12 @@ const (
 // that could break out of the quoted string it's written into.
 var ifaceRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
 
-// dockerIfaceRe allows an interface name or a prefix wildcard ("br-*").
+// patternRe allows an interface name or a prefix wildcard ("br-*").
 // Same character restrictions as ifaceRe, so nothing can break out of the
 // quoted string it's written into; the * may only be the final character,
 // and must follow at least one character (a bare "*" would match everything,
 // including the WAN).
-var dockerIfaceRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,14}\*?$`)
+var patternRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,14}\*?$`)
 
 // DefaultDockerInterfaces are the bridge names Docker creates: docker0 for
 // the default network and br-<id> for user-defined and compose networks.
@@ -83,22 +83,22 @@ func patternsOverlap(a, b string) bool {
 	return a == b
 }
 
-// DockerInterfaces returns the validated bridge patterns that will be
-// trusted, applying the defaults when none are configured. It refuses
-// anything that could match the WAN, a LAN segment or loopback: trusting
-// those by accident would silently turn the firewall off for them.
-func DockerInterfaces(snap config.Snapshot) ([]string, error) {
-	wan := strings.TrimSpace(snap.WANInterface)
-	var reserved []string
-	reserved = append(reserved, wan, "lo")
-	for _, seg := range snap.LANSegments {
-		reserved = append(reserved, strings.TrimSpace(seg.Interface))
-	}
+type reservedName struct{ name, what string }
 
-	in := snap.DockerInterfaces
-	if len(in) == 0 {
-		in = DefaultDockerInterfaces
+// baseReserved are the names no trusted-style pattern may ever match: the
+// WAN, loopback and the LAN segments. Trusting those by accident would
+// silently turn the firewall off for them.
+func baseReserved(snap config.Snapshot) []reservedName {
+	out := []reservedName{{strings.TrimSpace(snap.WANInterface), "the WAN interface"}, {"lo", "loopback"}}
+	for _, seg := range snap.LANSegments {
+		out = append(out, reservedName{strings.TrimSpace(seg.Interface), "a LAN segment"})
 	}
+	return out
+}
+
+// validatePatterns cleans and checks a list of name-or-prefix-wildcard
+// interface patterns against names they must never match.
+func validatePatterns(kind string, in []string, reserved []reservedName, hint string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	for _, raw := range in {
@@ -106,21 +106,82 @@ func DockerInterfaces(snap config.Snapshot) ([]string, error) {
 		if pat == "" || seen[pat] {
 			continue
 		}
-		if !dockerIfaceRe.MatchString(pat) {
-			return nil, fmt.Errorf("docker interface %q isn't valid: use an interface name like docker0, optionally ending in * (e.g. br-*)", raw)
+		if !patternRe.MatchString(pat) {
+			return nil, fmt.Errorf("%s interface %q isn't valid: %s", kind, raw, hint)
 		}
 		for _, r := range reserved {
-			if r != "" && patternsOverlap(pat, r) {
-				return nil, fmt.Errorf("docker interface %q would also match %q, which is the WAN, a LAN segment or loopback, and must never be trusted as a Docker bridge", pat, r)
+			if r.name != "" && patternsOverlap(pat, r.name) {
+				return nil, fmt.Errorf("%s interface %q would also match %q, which is %s and must never be trusted as a %s interface", kind, pat, r.name, r.what, kind)
 			}
 		}
 		seen[pat] = true
 		out = append(out, pat)
 	}
+	return out, nil
+}
+
+// effectiveDockerPatterns is the Docker bridge list in use (the defaults
+// when none are configured), trimmed but not validated.
+func effectiveDockerPatterns(snap config.Snapshot) []string {
+	in := snap.DockerInterfaces
+	if len(in) == 0 {
+		in = DefaultDockerInterfaces
+	}
+	var out []string
+	for _, p := range in {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// DockerInterfaces returns the validated bridge patterns that will be
+// trusted, applying the defaults when none are configured. It refuses
+// anything that could match the WAN, a LAN segment or loopback - and, when
+// Docker is enabled, a trusted VPN interface, which would otherwise quietly
+// override Docker's published-ports-only rule.
+func DockerInterfaces(snap config.Snapshot) ([]string, error) {
+	reserved := baseReserved(snap)
+	if snap.DockerEnabled {
+		for _, t := range snap.TrustedInterfaces {
+			if t = strings.TrimSpace(t); t != "" {
+				reserved = append(reserved, reservedName{t, "a trusted interface"})
+			}
+		}
+	}
+	out, err := validatePatterns("docker", effectiveDockerPatterns(snap), reserved,
+		"use an interface name like docker0, optionally ending in * (e.g. br-*)")
+	if err != nil {
+		return nil, err
+	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no docker interfaces configured")
 	}
 	return out, nil
+}
+
+// TrustedInterfaces returns the validated trusted-interface patterns (for
+// example a WireGuard "wg0"); none configured is valid and returns nil. They
+// are given the same access as a LAN segment's hosts, so a pattern that
+// could match the WAN, a LAN segment, loopback or (when Docker is enabled) a
+// Docker bridge is refused.
+func TrustedInterfaces(snap config.Snapshot) ([]string, error) {
+	reserved := baseReserved(snap)
+	if snap.DockerEnabled {
+		for _, d := range effectiveDockerPatterns(snap) {
+			reserved = append(reserved, reservedName{d, "a Docker bridge"})
+		}
+	}
+	return validatePatterns("trusted", snap.TrustedInterfaces, reserved,
+		"use an interface name like wg0, optionally ending in * (e.g. wg*)")
+}
+
+// ValidateTrusted checks the trusted-interface settings in snap so they can
+// be rejected before they are saved.
+func ValidateTrusted(snap config.Snapshot) error {
+	_, err := TrustedInterfaces(snap)
+	return err
 }
 
 // runFn is a seam for tests: production code pipes the ruleset to the
@@ -411,6 +472,11 @@ func Render(snap config.Snapshot) (string, error) {
 		}
 	}
 
+	trusted, err := TrustedInterfaces(snap)
+	if err != nil {
+		return "", fmt.Errorf("firewall: %w", err)
+	}
+
 	var inputRules, forwardRules, dnatRules []string
 	for _, r := range snap.PortRules {
 		if r.Disabled {
@@ -473,6 +539,9 @@ func Render(snap config.Snapshot) (string, error) {
 	for _, d := range docker {
 		w(`        iifname "%s" accept comment "docker: containers may talk to the router"`, d)
 	}
+	for _, t := range trusted {
+		w(`        iifname "%s" accept comment "trusted interface: may talk to the router"`, t)
+	}
 	for _, r := range inputRules {
 		w("        %s", r)
 	}
@@ -494,6 +563,17 @@ func Render(snap config.Snapshot) (string, error) {
 			w(`        iifname "%s" oifname "%s" accept`, d, wan)
 			w(`        iifname %s oifname "%s" ct status dnat accept`, lanSet, d)
 			w(`        iifname "%s" oifname "%s" %sct status dnat accept`, wan, d, dockerSrc)
+		}
+	}
+	if len(trusted) > 0 {
+		w("        # Trusted interfaces (e.g. a VPN) may reach the LAN segments and go out the WAN. New")
+		w("        # connections can't be started toward them - only replies, via the rule at the top.")
+		for _, t := range trusted {
+			w(`        iifname "%s" oifname %s accept`, t, lanSet)
+			w(`        iifname "%s" oifname "%s" accept`, t, wan)
+			for _, d := range docker {
+				w(`        iifname "%s" oifname "%s" ct status dnat accept`, t, d)
+			}
 		}
 	}
 	for _, r := range forwardRules {

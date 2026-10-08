@@ -499,6 +499,24 @@
         <p class="hint">Blank interfaces means <code>docker0</code> and <code>br-*</code> (a trailing <code>*</code> matches any ending). Names that would also match the WAN or a LAN interface are refused. The source limits who on the WAN side may reach published ports - an IPv4 address or CIDR; blank means any host on the WAN-side network.</p>
       </form>
 
+      <h2 id="vpn" style="margin-top:30px;">VPN (WireGuard)</h2>
+      <p class="desc">
+        Running a VPN server on this box (WireGuard's <code>wg0</code>, say)? List its interface here and the people connected through it are treated like a
+        LAN segment: they can reach this box, the LAN segments, the WAN-side network and (if Docker is on) published container ports. Nothing can start a
+        new connection <em>toward</em> a VPN client. Don't forget a rule under Port rules allowing UDP 51820 to this box, and a forward for it on your main router.
+        Off until you add an interface.
+      </p>
+      <form method="post" action="/api/firewall/trusted">
+        <div class="grid3">
+          <div>
+            <label>Trusted interfaces</label>
+            <input type="text" name="trusted_interfaces" value="{{.TrustedIfaceText}}" placeholder="wg0">
+          </div>
+          <div style="padding-top:22px;"><button type="submit">Save</button></div>
+        </div>
+        <p class="hint">Comma or space separated; a trailing <code>*</code> matches any ending (<code>wg*</code>). Names that would also match the WAN, a LAN interface, loopback or a Docker bridge are refused. Whoever holds a VPN key gets full LAN access, so keep the keys private.</p>
+      </form>
+
       <details style="margin-top:6px;">
         <summary>Show generated nftables ruleset</summary>
         {{if .FirewallPreviewErr}}

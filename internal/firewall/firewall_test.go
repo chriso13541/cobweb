@@ -580,3 +580,85 @@ func TestDockerRulesetPassesRealNftSyntaxCheck(t *testing.T) {
 		t.Skipf("nft -c unavailable here (%v: %s)", err, out) // e.g. no CAP_NET_ADMIN in this sandbox
 	}
 }
+
+func trustedSnap(patterns ...string) config.Snapshot {
+	snap := testSnap()
+	snap.TrustedInterfaces = patterns
+	return snap
+}
+
+func TestTrustedOffRendersExactlyTheBaseline(t *testing.T) {
+	if a, b := mustRender(t, trustedSnap()), mustRender(t, testSnap()); a != b {
+		t.Fatalf("empty trusted list changed the ruleset:\n%s", a)
+	}
+	if strings.Contains(mustRender(t, testSnap()), "trusted") {
+		t.Fatal("baseline ruleset mentions trusted interfaces")
+	}
+}
+
+func TestTrustedRulesRendered(t *testing.T) {
+	out := mustRender(t, trustedSnap("wg0"))
+	requireContains(t, out,
+		`iifname "wg0" accept comment "trusted interface: may talk to the router"`,
+		`iifname "wg0" oifname { "enp1s0", "enp1s0.20" } accept`,
+		`iifname "wg0" oifname "wlp2s0" accept`,
+	)
+	// Nothing may start a new connection toward the VPN.
+	if strings.Contains(out, `oifname "wg0"`) {
+		t.Fatalf("a rule allows traffic toward the trusted interface:\n%s", out)
+	}
+	// Docker is off, so no dnat rule to bridges.
+	if strings.Contains(out, "ct status dnat") {
+		t.Fatalf("unexpected dnat rule:\n%s", out)
+	}
+}
+
+func TestTrustedWildcardAndDocker(t *testing.T) {
+	snap := dockerSnap(func(s *config.Snapshot) { s.TrustedInterfaces = []string{"wg*"} })
+	out := mustRender(t, snap)
+	requireContains(t, out,
+		`iifname "wg*" oifname "docker0" ct status dnat accept`,
+		`iifname "wg*" oifname "br-*" ct status dnat accept`,
+	)
+}
+
+func TestTrustedRejectsDangerousPatterns(t *testing.T) {
+	for _, bad := range []string{"wlp2s0", "wlp*", "enp1s0", "enp1s0.20", "enp*", "lo", "*", "l*", "wg 0", `wg0"`, "a;b"} {
+		if err := ValidateTrusted(trustedSnap(bad)); err == nil {
+			t.Errorf("trusted pattern %q accepted", bad)
+		}
+		if _, err := Render(trustedSnap(bad)); err == nil {
+			t.Errorf("Render accepted trusted pattern %q", bad)
+		}
+	}
+}
+
+func TestTrustedAndDockerCannotOverlap(t *testing.T) {
+	// Only when Docker is enabled: otherwise the setting has no effect.
+	dock := func(trusted, bridges []string) config.Snapshot {
+		return dockerSnap(func(s *config.Snapshot) { s.TrustedInterfaces = trusted; s.DockerInterfaces = bridges })
+	}
+	for _, c := range []struct{ trusted, bridges []string }{
+		{[]string{"br-*"}, nil},
+		{[]string{"docker0"}, nil},
+		{[]string{"br-vpn"}, nil},
+		{[]string{"wg0"}, []string{"wg*"}},
+	} {
+		if _, err := Render(dock(c.trusted, c.bridges)); err == nil {
+			t.Errorf("overlap accepted: trusted=%v docker=%v", c.trusted, c.bridges)
+		}
+	}
+	s := testSnap()
+	s.TrustedInterfaces = []string{"br-vpn"}
+	s.DockerInterfaces = []string{"br-*"} // docker disabled
+	if _, err := Render(s); err != nil {
+		t.Errorf("overlap with a disabled Docker feature should be allowed: %v", err)
+	}
+}
+
+func TestTrustedDedupeAndBlank(t *testing.T) {
+	got, err := TrustedInterfaces(trustedSnap(" wg0 ", "", "wg0", "wg1"))
+	if err != nil || len(got) != 2 || got[0] != "wg0" || got[1] != "wg1" {
+		t.Fatalf("got %v, %v", got, err)
+	}
+}

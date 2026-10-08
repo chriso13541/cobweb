@@ -339,3 +339,40 @@ func TestOldConfigWithoutFirewallFieldsLoadsDisabled(t *testing.T) {
 		t.Fatalf("an old config must load with the firewall off and no rules: %+v", snap)
 	}
 }
+
+func TestTrustedInterfacesPersistAndRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Snapshot().TrustedInterfaces; got == nil || len(got) != 0 {
+		t.Fatalf("default = %#v, want empty non-nil", got)
+	}
+	if err := c.SetTrustedInterfaces([]string{"wg0", "wg1"}); err != nil {
+		t.Fatal(err)
+	}
+	snap := c.Snapshot()
+	snap.TrustedInterfaces[0] = "mutated" // the snapshot must be a copy
+	if c.Snapshot().TrustedInterfaces[0] != "wg0" {
+		t.Fatal("snapshot aliases the live slice")
+	}
+	c2, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c2.Snapshot().TrustedInterfaces, ","); got != "wg0,wg1" {
+		t.Fatalf("reloaded %q", got)
+	}
+	exp, err := c.ExportJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c3, _ := Load(filepath.Join(t.TempDir(), "other.json"))
+	if err := c3.ImportJSON(exp); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c3.Snapshot().TrustedInterfaces, ","); got != "wg0,wg1" {
+		t.Fatalf("imported %q", got)
+	}
+}

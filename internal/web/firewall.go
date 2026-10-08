@@ -217,3 +217,47 @@ func (s *Server) handleFirewallDocker(w http.ResponseWriter, r *http.Request) {
 		s.renderFirewall(w, http.StatusOK, "", "Docker containers are no longer given a path through the firewall.")
 	}
 }
+
+// handleFirewallTrusted saves the trusted-interface list (e.g. a WireGuard
+// "wg0"). Like the Docker settings it is validated first, applied at once if
+// the firewall is on, and rolled back if the kernel refuses it.
+func (s *Server) handleFirewallTrusted(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	ifaces := strings.FieldsFunc(r.PostFormValue("trusted_interfaces"), func(c rune) bool {
+		return c == ',' || unicode.IsSpace(c)
+	})
+
+	prev := s.cfg.Snapshot()
+	candidate := prev
+	candidate.TrustedInterfaces = ifaces
+	if err := firewall.ValidateTrusted(candidate); err != nil {
+		s.renderFirewall(w, http.StatusBadRequest, "VPN settings not saved: "+err.Error(), "")
+		return
+	}
+
+	if err := s.cfg.SetTrustedInterfaces(ifaces); err != nil {
+		log.Printf("trusted interfaces: %v", err)
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+	if err := s.applyIfEnabled(); err != nil {
+		log.Printf("firewall: apply after trusted interfaces: %v", err)
+		if rerr := s.cfg.SetTrustedInterfaces(prev.TrustedInterfaces); rerr != nil {
+			log.Printf("firewall: roll back trusted interfaces: %v", rerr)
+		}
+		s.renderFirewall(w, http.StatusOK, "VPN settings not changed - applying them failed and nothing was changed. "+err.Error(), "")
+		return
+	}
+
+	switch {
+	case !s.cfg.Snapshot().FirewallEnabled:
+		s.renderFirewall(w, http.StatusOK, "", "VPN settings saved. They take effect once the firewall is enabled.")
+	case len(ifaces) > 0:
+		s.renderFirewall(w, http.StatusOK, "", "VPN interfaces are now trusted and the change is live.")
+	default:
+		s.renderFirewall(w, http.StatusOK, "", "No interfaces are trusted any more.")
+	}
+}

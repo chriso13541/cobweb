@@ -156,6 +156,13 @@ type Config struct {
 	DockerInterfaces []string `json:"docker_interfaces"`
 	DockerWANSource  string   `json:"docker_wan_source,omitempty"`
 
+	// TrustedInterfaces are extra interfaces (e.g. a WireGuard "wg0") whose
+	// hosts are treated like a LAN segment's: they may reach the router and
+	// the LAN segments and go out the WAN. Connections can't be started
+	// toward them, only replied to. Empty means none. A trailing * is a
+	// wildcard.
+	TrustedInterfaces []string `json:"trusted_interfaces"`
+
 	// Dashboard
 	ListenAddr string `json:"listen_addr"`
 
@@ -239,6 +246,7 @@ func Default(path string) *Config {
 		ListenAddr:        "0.0.0.0:8070",
 		PortRules:         []PortRule{},
 		DockerInterfaces:  []string{},
+		TrustedInterfaces: []string{},
 		Reservations:      []Reservation{},
 		DNSRecords:        []DNSRecord{},
 		Leases:            []Lease{},
@@ -486,6 +494,10 @@ func (c *Config) ImportJSON(data []byte) error {
 		c.DockerInterfaces = []string{}
 	}
 	c.DockerWANSource = parsed.DockerWANSource
+	c.TrustedInterfaces = parsed.TrustedInterfaces
+	if c.TrustedInterfaces == nil {
+		c.TrustedInterfaces = []string{}
+	}
 	c.PortRules = parsed.PortRules
 	if c.PortRules == nil {
 		c.PortRules = []PortRule{} // older exports predate this field
@@ -522,6 +534,7 @@ type Snapshot struct {
 	DockerEnabled     bool
 	DockerInterfaces  []string
 	DockerWANSource   string
+	TrustedInterfaces []string
 	ListenAddr        string
 	Reservations      []Reservation
 	DNSRecords        []DNSRecord
@@ -550,6 +563,7 @@ func (c *Config) Snapshot() Snapshot {
 		DockerEnabled:     c.DockerEnabled,
 		DockerInterfaces:  append([]string{}, c.DockerInterfaces...),
 		DockerWANSource:   c.DockerWANSource,
+		TrustedInterfaces: append([]string{}, c.TrustedInterfaces...),
 		ListenAddr:        c.ListenAddr,
 		Reservations:      append([]Reservation{}, c.Reservations...),
 		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
@@ -887,6 +901,15 @@ func (c *Config) SetDocker(enabled bool, interfaces []string, wanSource string) 
 	c.DockerEnabled = enabled
 	c.DockerInterfaces = append([]string{}, interfaces...)
 	c.DockerWANSource = wanSource
+	return c.saveLocked()
+}
+
+// SetTrustedInterfaces persists the list of trusted (VPN) interfaces. Like
+// the other firewall setters it only stores; the caller validates and applies.
+func (c *Config) SetTrustedInterfaces(interfaces []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.TrustedInterfaces = append([]string{}, interfaces...)
 	return c.saveLocked()
 }
 
