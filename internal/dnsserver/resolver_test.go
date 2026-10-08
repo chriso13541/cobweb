@@ -2,8 +2,10 @@ package dnsserver
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -21,6 +23,15 @@ func startFakeServer(t *testing.T, ip string, handler func(qname string, qtype u
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(ip), Port: 53})
 	if err != nil {
+		// These tests need to stand in for DNS servers, which means port 53.
+		// That's unavailable whenever a real DNS server (e.g. the running
+		// cobweb on a live router) already holds it, or when not running as
+		// root. That's a limitation of the environment, not a failure of the
+		// code under test, so skip instead of failing - otherwise `go test
+		// ./...` could never pass on the very machine cobweb is deployed to.
+		if errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("can't bind %s:53 (%v); needs root and port 53 free", ip, err)
+		}
 		t.Fatalf("failed to start fake server on %s:53: %v", ip, err)
 	}
 	t.Cleanup(func() { conn.Close() })

@@ -24,11 +24,22 @@ import (
 	"cobweb/internal/web"
 )
 
+// version is stamped at build time by update.sh
+// (-ldflags "-X main.version=<git describe>"); a plain `go build` reports "dev".
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print cobweb's version and exit")
 	configPath := flag.String("config", "/etc/cobweb/config.json", "path to cobweb's config file")
 	credsPath := flag.String("creds", "", "path to cobweb's credentials file (defaults next to --config)")
 	printFirewall := flag.Bool("print-firewall", false, "print the nftables ruleset cobweb would apply for this config, then exit (changes nothing); try: cobweb --print-firewall | sudo nft -c -f -")
 	flag.Parse()
+
+	// Before anything touches disk or the network.
+	if *showVersion {
+		fmt.Println("cobweb", version)
+		return
+	}
 
 	if *credsPath == "" {
 		*credsPath = filepath.Join(filepath.Dir(*configPath), "credentials.json")
@@ -64,7 +75,7 @@ func main() {
 	if err := cfg.Save(); err != nil {
 		log.Fatalf("failed to write initial config to %s: %v", *configPath, err)
 	}
-	log.Printf("cobweb: config loaded from %s", *configPath)
+	log.Printf("cobweb %s: config loaded from %s", version, *configPath)
 
 	credStore, err := auth.Load(*credsPath)
 	if err != nil {

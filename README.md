@@ -135,6 +135,69 @@ errors on the config directory) for a single-purpose home gateway box
 where root is already the trust boundary - worth doing if you want the
 extra hardening, not required.
 
+## Updating
+
+From the cloned repo, as your normal user (not with `sudo` - it uses sudo
+itself, only for the steps that need it):
+
+```bash
+./update.sh --check    # what's new on origin and what's installed; changes nothing
+./update.sh            # fetch, test, build, install, restart (asks first)
+```
+
+In order, stopping at the first thing that looks wrong - and everything up
+to the install step happens before the running cobweb is touched:
+
+1. Refuses if the checkout has uncommitted changes, or has diverged from
+   origin. It only ever fast-forwards; it never merges or rebases for you.
+2. Shows the incoming commits, asks, then fast-forwards.
+3. Runs `go test ./...` and builds into a temp directory. A failure in
+   either leaves the installed cobweb alone.
+4. If the result is byte-identical to what's installed, stops without a
+   restart.
+5. Backs up `config.json` and `credentials.json` to
+   `/etc/cobweb/backups/` (private, newest 10 kept).
+6. Keeps the old binary as `/usr/local/bin/cobweb.prev` and swaps the
+   new one in atomically.
+7. Restarts the service and watches it for 8 seconds (`COBWEB_SETTLE_SECS`).
+   If it doesn't stay up, it puts the old binary **and the old
+   `config.json`** back (a different version can rewrite the config, and
+   an older build re-saving it drops settings it doesn't know about) and
+   exits non-zero.
+
+Restarting pauses DNS and DHCP for a second or two. Existing connections,
+NAT and port forwards keep working because the kernel does the forwarding,
+and leases are persisted in `config.json`.
+
+Other flags: `--yes` (don't ask), `--force` (reinstall even if identical),
+`--skip-tests`. Paths can be overridden with `COBWEB_BIN`, `COBWEB_CONFIG`
+and `COBWEB_SERVICE`. `cobweb --version` reports which build is running
+(`dev` for a plain `go build`).
+
+It needs `git`, `sudo` and a Go toolchain at least as new as `go.mod`
+asks for - it checks, and says so if yours is too old. It never edits your
+systemd unit (it warns if the repo's differs from the installed one), never
+touches nftables, and never updates Go itself.
+
+The DNS resolver tests stand in for DNS servers, which means binding port
+53. That needs root and the port free, so on a live router (where cobweb
+already holds it) they skip themselves instead of failing; everything else
+still runs.
+
+### By hand
+
+If you'd rather not use the script, this is all it does:
+
+```bash
+git pull --ff-only
+go build -trimpath -o /tmp/cobweb-new ./cmd/cobweb
+sudo cp -p /etc/cobweb/config.json /etc/cobweb/config.json.bak
+sudo cp -p /usr/local/bin/cobweb /usr/local/bin/cobweb.prev
+sudo install -m 0755 /tmp/cobweb-new /usr/local/bin/cobweb.new
+sudo mv -f /usr/local/bin/cobweb.new /usr/local/bin/cobweb   # not `cp`: a running binary can't be overwritten in place
+sudo systemctl restart cobweb && journalctl -u cobweb -n 20 --no-pager
+```
+
 ## Config file
 
 Everything lives in one JSON file (default `/etc/cobweb/config.json`).
