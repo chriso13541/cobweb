@@ -274,3 +274,68 @@ func TestImportJSONDoesNotCorruptTheMutex(t *testing.T) {
 		t.Fatal("Config methods hung after ImportJSON - the mutex was likely corrupted")
 	}
 }
+
+func TestPortRulesRoundTripThroughExportImport(t *testing.T) {
+	c := Default(tempConfigPath(t))
+	added, err := c.AddPortRule(PortRule{
+		ID: "ignored-caller-id", Name: "SMB share", Kind: RuleForward, Protocol: "tcp",
+		Port: "445", ToIP: "192.168.2.10", Source: "192.168.1.0/24",
+	})
+	if err != nil {
+		t.Fatalf("AddPortRule: %v", err)
+	}
+	if added.ID == "" || added.ID == "ignored-caller-id" {
+		t.Fatalf("rule ID must be generated, not taken from the caller: %q", added.ID)
+	}
+	if err := c.SetFirewallEnabled(true); err != nil {
+		t.Fatalf("SetFirewallEnabled: %v", err)
+	}
+	if err := c.SetPortRuleDisabled(added.ID, true); err != nil {
+		t.Fatalf("SetPortRuleDisabled: %v", err)
+	}
+
+	exported, err := c.ExportJSON()
+	if err != nil {
+		t.Fatalf("ExportJSON: %v", err)
+	}
+	fresh := Default(tempConfigPath(t))
+	if err := fresh.ImportJSON(exported); err != nil {
+		t.Fatalf("ImportJSON: %v", err)
+	}
+	snap := fresh.Snapshot()
+	if !snap.FirewallEnabled || len(snap.PortRules) != 1 {
+		t.Fatalf("firewall settings didn't survive export/import: %+v", snap)
+	}
+	if r := snap.PortRules[0]; r.ID != added.ID || r.Port != "445" || !r.Disabled || r.Source != "192.168.1.0/24" {
+		t.Fatalf("rule changed in transit: %+v", r)
+	}
+
+	if err := fresh.RemovePortRule(added.ID); err != nil {
+		t.Fatalf("RemovePortRule: %v", err)
+	}
+	if len(fresh.Snapshot().PortRules) != 0 {
+		t.Fatal("rule still present after RemovePortRule")
+	}
+	if err := fresh.SetPortRuleDisabled("rule-nope", true); err == nil {
+		t.Fatal("expected an error toggling a rule that doesn't exist")
+	}
+}
+
+// A config.json written before the firewall feature existed has neither
+// key. It must load with the firewall off, so that upgrading never
+// starts managing nftables on its own.
+func TestOldConfigWithoutFirewallFieldsLoadsDisabled(t *testing.T) {
+	path := tempConfigPath(t)
+	old := `{"wan_interface":"wlp2s0","lan_segments":[{"id":"seg-1","name":"Default","interface":"enp1s0","address":"192.168.2.1","subnet_mask":"255.255.255.0","pool_start":"192.168.2.10","pool_end":"192.168.2.254","domain":"lan"}],"lease_seconds":86400,"dns_mode":"forward","listen_addr":"0.0.0.0:8070"}`
+	if err := os.WriteFile(path, []byte(old), 0640); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	snap := c.Snapshot()
+	if snap.FirewallEnabled || len(snap.PortRules) != 0 {
+		t.Fatalf("an old config must load with the firewall off and no rules: %+v", snap)
+	}
+}

@@ -92,6 +92,22 @@
   .flash{ font-size:13px; padding:10px 12px; border-radius:var(--radius); margin-bottom:16px; }
   .flash-error{ background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger); }
   .flash-ok{ background:var(--accent); border:1px solid var(--accent); color:var(--accent-hover-text); }
+  .flash-warn{ background:var(--panel-2); border:1px solid var(--warn-border); color:var(--warn); }
+
+  /* --- firewall panel --- */
+  .fw-form select{
+    width:100%; background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    padding:9px 11px; border-radius:var(--radius); font-family:var(--mono); font-size:13.5px;
+    margin-bottom:16px;
+  }
+  .fw-form select:focus{ outline:none; border-color:var(--accent-dim); }
+  .fw-form pre{
+    background:var(--panel-2); border:1px solid var(--border); border-radius:var(--radius);
+    padding:12px 14px; overflow:auto; font-family:var(--mono); font-size:12px; line-height:1.5;
+    margin:10px 0 0; color:var(--text-dim);
+  }
+  .fw-form details > summary{ cursor:pointer; font-size:13px; font-weight:600; color:var(--accent); }
+  .fw-form .hint{ font-size:12px; color:var(--text-faint); margin:-8px 0 16px; line-height:1.4; }
 
   /* --- theme toggle switch --- */
   .theme-row{ display:flex; align-items:center; justify-content:space-between; }
@@ -339,6 +355,133 @@
         row.style.display = (row.style.display === 'none') ? 'table-row' : 'none';
       }
     </script>
+
+    <div class="section-label" id="firewall">Firewall &amp; port forwarding</div>
+    <div class="panel fw-form">
+      <h2>Port rules</h2>
+      <p class="desc">
+        cobweb can run this box's firewall itself: filtering, NAT masquerade for the LAN segments, and the
+        port rules below, all generated from this page and applied atomically. It owns two nftables tables
+        (<code>cobweb</code> and <code>cobweb_nat</code>) and never touches any other. Off by default.
+      </p>
+      <p class="desc">
+        <strong>Forward</strong> sends traffic that arrives on the WAN side, at this box's own WAN address on
+        the given port, to a host inside one of your LAN segments - e.g. SMB (445) to a machine in your room,
+        reachable from the house network at this box's WAN IP.
+        <strong>Allow to this box</strong> lets a WAN-side host reach a service running on this box itself, e.g.
+        a file browser that a reverse proxy talks to. Set a <strong>Source</strong> whenever you can: a rule without
+        one accepts traffic from every host on the WAN-side network.
+      </p>
+
+      {{if .FirewallError}}<div class="flash flash-error">{{.FirewallError}}</div>{{end}}
+      {{if .FirewallSuccess}}<div class="flash flash-ok">{{.FirewallSuccess}}</div>{{end}}
+      {{range .FirewallWarnings}}<div class="flash flash-warn">{{.}}</div>{{end}}
+      {{if .ForeignTables}}
+        <div class="flash flash-warn">
+          {{if .FirewallEnabled}}These other nftables tables are still loaded and are evaluated alongside cobweb's:{{else}}Before enabling, retire your existing nftables ruleset. These tables are loaded right now:{{end}}
+          <strong>{{join .ForeignTables ", "}}</strong>.
+          nftables evaluates every table, so a leftover <code>policy drop</code> in one of them can still block traffic cobweb's rules allow.
+        </div>
+      {{end}}
+
+      <form method="post" action="/api/firewall/toggle" style="margin-bottom:22px;"
+            onsubmit="return confirm({{if .FirewallEnabled}}'Disabling removes cobweb\'s NAT and filtering. Unless another ruleset is loaded, the LAN segments will lose internet access. Continue?'{{else}}'Enabling makes cobweb responsible for this box\'s filtering and NAT. Have you reviewed the generated ruleset below, and added an SSH rule if you manage this box over the house network? Continue?'{{end}});">
+        <input type="hidden" name="enabled" value="{{if .FirewallEnabled}}0{{else}}1{{end}}">
+        <div class="theme-row">
+          <div>
+            <div class="label-text">{{if .FirewallEnabled}}Managed by cobweb{{else}}Off{{end}}</div>
+            <div class="label-sub">{{if .FirewallEnabled}}Rules below are live. Changes apply immediately.{{else}}cobweb isn't touching nftables. Rules you add are saved and take effect when you enable this.{{end}}</div>
+          </div>
+          <button type="submit" {{if .FirewallEnabled}}class="danger"{{end}}>{{if .FirewallEnabled}}Disable{{else}}Enable &amp; apply{{end}}</button>
+        </div>
+      </form>
+
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Match</th><th>Sends to</th><th>Source</th><th></th></tr></thead>
+        <tbody>
+          {{if not .PortRules}}
+            <tr><td colspan="6" class="empty">No rules yet.</td></tr>
+          {{else}}
+            {{range .PortRules}}
+            <tr {{if .Disabled}}style="opacity:0.5;"{{end}}>
+              <td>{{.Name}}{{if .Disabled}} <span style="color:var(--text-faint);">(off)</span>{{end}}</td>
+              <td>{{if eq .Kind "forward"}}Forward{{else}}Allow to this box{{end}}</td>
+              <td>{{.Protocol}} {{.Port}}</td>
+              <td>{{if eq .Kind "forward"}}{{.ToIP}}{{if .ToPort}}:{{.ToPort}}{{end}}{{else}}—{{end}}</td>
+              <td>{{if .Source}}{{.Source}}{{else}}anywhere{{end}}</td>
+              <td style="white-space:nowrap;">
+                <form method="post" action="/api/firewall/rules/toggle" style="display:inline; margin:0;">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <input type="hidden" name="disabled" value="{{if .Disabled}}0{{else}}1{{end}}">
+                  <button type="submit" class="link-btn">{{if .Disabled}}Turn on{{else}}Turn off{{end}}</button>
+                </form>
+                <form method="post" action="/api/firewall/rules/remove" style="display:inline; margin:0 0 0 10px;">
+                  <input type="hidden" name="id" value="{{.ID}}">
+                  <button type="submit" class="danger">Remove</button>
+                </form>
+              </td>
+            </tr>
+            {{end}}
+          {{end}}
+        </tbody>
+      </table>
+
+      <form method="post" action="/api/firewall/rules/add" style="margin-top:16px;">
+        <div class="grid3">
+          <div><label>Name</label><input type="text" name="name" placeholder="SMB share"></div>
+          <div>
+            <label>Type</label>
+            <select name="kind" onchange="onFirewallKindChange(this)">
+              <option value="forward">Forward to a LAN host</option>
+              <option value="input">Allow to this box</option>
+            </select>
+          </div>
+          <div>
+            <label>Protocol</label>
+            <select name="protocol">
+              <option value="tcp">tcp</option>
+              <option value="udp">udp</option>
+              <option value="both">tcp + udp</option>
+            </select>
+          </div>
+          <div style="padding-top:22px;"><button type="submit">Add rule</button></div>
+        </div>
+        <div class="grid3">
+          <div><label>Port or range</label><input type="text" name="port" placeholder="445 or 8000-8010"></div>
+          <div id="fw-to-ip-field"><label>Send to (LAN host IP)</label><input type="text" name="to_ip" placeholder="192.168.2.10"></div>
+          <div id="fw-to-port-field"><label>Target port (optional)</label><input type="text" name="to_port" placeholder="same as above"></div>
+          <div></div>
+        </div>
+        <label>Source (optional)</label>
+        <input type="text" name="source" placeholder="192.168.1.0/24 or a single IP - blank means anywhere on the WAN side">
+        <p class="hint">Only IPv4. A forward's target must be inside one of the LAN segments above, and a port range keeps its ports (it can't be remapped).</p>
+      </form>
+
+      <details style="margin-top:6px;">
+        <summary>Show generated nftables ruleset</summary>
+        {{if .FirewallPreviewErr}}
+          <div class="flash flash-error" style="margin-top:10px;">{{.FirewallPreviewErr}}</div>
+        {{else}}
+          <pre>{{.FirewallPreview}}</pre>
+        {{end}}
+        <p class="desc" style="margin-top:10px;">
+          Check it from a shell without changing anything:
+          <code>cobweb --print-firewall | sudo nft -c -f -</code>
+        </p>
+      </details>
+    </div>
+
+    <script>
+      function onFirewallKindChange(select){
+        var isForward = select.value === 'forward';
+        ['fw-to-ip-field', 'fw-to-port-field'].forEach(function(id){
+          var field = document.getElementById(id);
+          field.style.opacity = isForward ? '1' : '0.45';
+          field.querySelector('input').disabled = !isForward;
+        });
+      }
+    </script>
+    {{if or .FirewallError .FirewallSuccess}}<script>document.getElementById('firewall').scrollIntoView();</script>{{end}}
 
     <div class="section-label">Static reservations</div>
     <div class="panel">

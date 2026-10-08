@@ -8,8 +8,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"cobweb/internal/config"
 	"cobweb/internal/dhcp"
 	"cobweb/internal/dnsserver"
+	"cobweb/internal/firewall"
 	"cobweb/internal/sqm"
 	"cobweb/internal/web"
 )
@@ -24,6 +27,7 @@ import (
 func main() {
 	configPath := flag.String("config", "/etc/cobweb/config.json", "path to cobweb's config file")
 	credsPath := flag.String("creds", "", "path to cobweb's credentials file (defaults next to --config)")
+	printFirewall := flag.Bool("print-firewall", false, "print the nftables ruleset cobweb would apply for this config, then exit (changes nothing); try: cobweb --print-firewall | sudo nft -c -f -")
 	flag.Parse()
 
 	if *credsPath == "" {
@@ -34,6 +38,27 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// A preview must never write anything - not the ruleset, and not even
+	// the default config a fresh install would otherwise persist below -
+	// so it runs before any of that.
+	if *printFirewall {
+		snap := cfg.Snapshot()
+		ruleset, err := firewall.Render(snap)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cobweb: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(ruleset)
+		for _, w := range firewall.Warnings(snap) {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		if !snap.FirewallEnabled {
+			fmt.Fprintln(os.Stderr, "note: firewall_enabled is false in this config, so cobweb won't apply this on its own yet.")
+		}
+		return
+	}
+
 	// Persist immediately so a fresh install writes out its defaults to
 	// disk right away, rather than only on the first settings change.
 	if err := cfg.Save(); err != nil {
@@ -81,6 +106,17 @@ func main() {
 			UploadMbit:   startupSnap.SQMUploadMbit,
 		}); err != nil {
 			log.Printf("sqm: failed to apply traffic shaping at startup: %v", err)
+		}
+	}
+
+	// Like SQM, only touch the kernel if the person turned this on. A
+	// failure here is logged, not fatal: the dashboard has to stay up so
+	// the rules can be fixed from it.
+	if startupSnap.FirewallEnabled {
+		if err := firewall.Apply(startupSnap); err != nil {
+			log.Printf("firewall: failed to apply rules at startup: %v", err)
+		} else {
+			log.Printf("firewall: applied %d port rule(s)", len(startupSnap.PortRules))
 		}
 	}
 

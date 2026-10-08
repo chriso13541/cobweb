@@ -18,6 +18,7 @@ import (
 	"cobweb/internal/auth"
 	"cobweb/internal/config"
 	"cobweb/internal/dnsserver"
+	"cobweb/internal/firewall"
 	"cobweb/internal/netstat"
 	"cobweb/internal/sqm"
 	"cobweb/internal/status"
@@ -32,6 +33,10 @@ type Server struct {
 	creds    *auth.Store
 	sessions *auth.SessionManager
 	throttle *auth.LoginThrottle
+
+	// applyFirewall pushes a config snapshot to the kernel. It's a field
+	// so tests can substitute it rather than shelling out to a real nft.
+	applyFirewall func(config.Snapshot) error
 }
 
 //go:embed templates/*.html
@@ -55,6 +60,8 @@ func New(cfg *config.Config, creds *auth.Store) (*Server, error) {
 		creds:    creds,
 		sessions: auth.NewSessionManager(),
 		throttle: auth.NewLoginThrottle(),
+
+		applyFirewall: firewall.Apply,
 	}, nil
 }
 
@@ -72,25 +79,54 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/fragments/devices", s.requireAuth(s.handleDevicesFragment))
 	mux.HandleFunc("/fragments/interfaces", s.requireAuth(s.handleInterfacesFragment))
 	mux.HandleFunc("/fragments/performance", s.requireAuth(s.handlePerformanceFragment))
-	mux.HandleFunc("/api/reservations/add", s.requireAuth(s.handleAddReservation))
-	mux.HandleFunc("/api/reservations/remove", s.requireAuth(s.handleRemoveReservation))
-	mux.HandleFunc("/api/reservations/quickadd", s.requireAuth(s.handleQuickReserve))
-	mux.HandleFunc("/api/reservations/quickremove", s.requireAuth(s.handleQuickRemoveReservation))
-	mux.HandleFunc("/api/leases/quickremove", s.requireAuth(s.handleQuickRemoveLease))
-	mux.HandleFunc("/api/discovered/quickremove", s.requireAuth(s.handleQuickRemoveDiscovered))
-	mux.HandleFunc("/api/devices/rename", s.requireAuth(s.handleRenameDevice))
-	mux.HandleFunc("/api/dns/add", s.requireAuth(s.handleAddDNSRecord))
-	mux.HandleFunc("/api/dns/remove", s.requireAuth(s.handleRemoveDNSRecord))
-	mux.HandleFunc("/api/network/update", s.requireAuth(s.handleUpdateNetwork))
-	mux.HandleFunc("/api/sqm/update", s.requireAuth(s.handleUpdateSQM))
-	mux.HandleFunc("/api/segments/add", s.requireAuth(s.handleAddLANSegment))
-	mux.HandleFunc("/api/segments/update", s.requireAuth(s.handleUpdateLANSegment))
-	mux.HandleFunc("/api/segments/remove", s.requireAuth(s.handleRemoveLANSegment))
+	// Everything under /api that changes state goes through s.mutating,
+	// which insists on POST. These handlers read their input with
+	// r.FormValue, which also reads the URL query string - so without
+	// this, a plain GET link (which a SameSite=Lax cookie still rides
+	// along on) could trigger a change. Export is the one read-only
+	// /api route and stays a GET download.
+	mux.HandleFunc("/api/reservations/add", s.mutating(s.handleAddReservation))
+	mux.HandleFunc("/api/reservations/remove", s.mutating(s.handleRemoveReservation))
+	mux.HandleFunc("/api/reservations/quickadd", s.mutating(s.handleQuickReserve))
+	mux.HandleFunc("/api/reservations/quickremove", s.mutating(s.handleQuickRemoveReservation))
+	mux.HandleFunc("/api/leases/quickremove", s.mutating(s.handleQuickRemoveLease))
+	mux.HandleFunc("/api/discovered/quickremove", s.mutating(s.handleQuickRemoveDiscovered))
+	mux.HandleFunc("/api/devices/rename", s.mutating(s.handleRenameDevice))
+	mux.HandleFunc("/api/dns/add", s.mutating(s.handleAddDNSRecord))
+	mux.HandleFunc("/api/dns/remove", s.mutating(s.handleRemoveDNSRecord))
+	mux.HandleFunc("/api/network/update", s.mutating(s.handleUpdateNetwork))
+	mux.HandleFunc("/api/sqm/update", s.mutating(s.handleUpdateSQM))
+	mux.HandleFunc("/api/firewall/toggle", s.mutating(s.handleFirewallToggle))
+	mux.HandleFunc("/api/firewall/rules/add", s.mutating(s.handleFirewallAddRule))
+	mux.HandleFunc("/api/firewall/rules/remove", s.mutating(s.handleFirewallRemoveRule))
+	mux.HandleFunc("/api/firewall/rules/toggle", s.mutating(s.handleFirewallToggleRule))
+	mux.HandleFunc("/api/segments/add", s.mutating(s.handleAddLANSegment))
+	mux.HandleFunc("/api/segments/update", s.mutating(s.handleUpdateLANSegment))
+	mux.HandleFunc("/api/segments/remove", s.mutating(s.handleRemoveLANSegment))
 	mux.HandleFunc("/api/config/export", s.requireAuth(s.handleExportConfig))
-	mux.HandleFunc("/api/config/import", s.requireAuth(s.handleImportConfig))
-	mux.HandleFunc("/api/account/update", s.requireAuth(s.handleAccountUpdate))
+	mux.HandleFunc("/api/config/import", s.mutating(s.handleImportConfig))
+	mux.HandleFunc("/api/account/update", s.mutating(s.handleAccountUpdate))
 
 	return mux
+}
+
+// requirePOST rejects anything but POST with a 405.
+func requirePOST(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// mutating wraps a state-changing handler: it must be authenticated and
+// must be a POST. Auth is checked first so an unauthenticated probe
+// can't tell a real route from a missing one by the status code.
+func (s *Server) mutating(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(requirePOST(next))
 }
 
 // --- auth ---
@@ -192,6 +228,16 @@ type settingsData struct {
 	config.Snapshot
 	AccountError   string
 	AccountSuccess string
+
+	// Firewall panel state. The preview is rendered from the live config
+	// on every page load, so it always shows exactly what would be (or
+	// is) applied.
+	FirewallError      string
+	FirewallSuccess    string
+	FirewallPreview    string
+	FirewallPreviewErr string
+	FirewallWarnings   []string
+	ForeignTables      []string
 }
 
 func (s *Server) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
@@ -254,16 +300,34 @@ func (s *Server) handleARPDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, accountErr, accountOK string) {
+// buildSettingsData assembles everything the settings page renders,
+// including the live firewall preview and warnings.
+func (s *Server) buildSettingsData(accountErr, accountOK string) settingsData {
+	snap := s.cfg.Snapshot()
 	data := settingsData{
-		Snapshot:       s.cfg.Snapshot(),
-		AccountError:   accountErr,
-		AccountSuccess: accountOK,
+		Snapshot:         snap,
+		AccountError:     accountErr,
+		AccountSuccess:   accountOK,
+		FirewallWarnings: firewall.Warnings(snap),
+		ForeignTables:    firewall.ForeignTables(),
 	}
+	if preview, err := firewall.Render(snap); err != nil {
+		data.FirewallPreviewErr = err.Error()
+	} else {
+		data.FirewallPreview = preview
+	}
+	return data
+}
+
+func (s *Server) renderSettingsData(w http.ResponseWriter, data settingsData) {
 	if err := s.tmpl.ExecuteTemplate(w, "settings.html", data); err != nil {
 		log.Printf("render settings: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) renderSettings(w http.ResponseWriter, r *http.Request, accountErr, accountOK string) {
+	s.renderSettingsData(w, s.buildSettingsData(accountErr, accountOK))
 }
 
 // --- fragments ---

@@ -83,6 +83,36 @@ type DiscoveredDevice struct {
 	LastSeen  int64  `json:"last_seen"` // unix seconds, refreshed every time this MAC still shows up live in ARP
 }
 
+// Port rule kinds.
+const (
+	// RuleForward is a port forward: traffic arriving on the WAN side for
+	// this router's own address is DNAT'd to a host inside one of the LAN
+	// segments (e.g. an SMB share on a room machine, reachable from the
+	// main house network).
+	RuleForward = "forward"
+	// RuleInput allows WAN-side traffic to reach a service running on this
+	// box itself (e.g. a file browser that a reverse proxy upstream talks
+	// to).
+	RuleInput = "input"
+)
+
+// PortRule is one user-defined firewall rule. Everything here is plain
+// data; internal/firewall validates it and turns it into nftables
+// syntax, and re-derives every value it writes from a parsed form
+// rather than interpolating these strings, so a hand-edited or imported
+// config can't inject arbitrary nft commands.
+type PortRule struct {
+	ID       string `json:"id"`                 // stable, generated once
+	Name     string `json:"name"`               // display label; only ever used as a sanitized nft comment
+	Kind     string `json:"kind"`               // RuleForward or RuleInput
+	Protocol string `json:"protocol"`           // "tcp", "udp", or "both"
+	Port     string `json:"port"`               // "445" or a range like "8000-8010"
+	ToIP     string `json:"to_ip,omitempty"`    // forward only: the LAN host to send traffic to
+	ToPort   string `json:"to_port,omitempty"`  // forward only: optional, single port; blank keeps Port unchanged
+	Source   string `json:"source,omitempty"`   // optional IPv4 or CIDR the traffic must come from; blank = anywhere on the WAN side
+	Disabled bool   `json:"disabled,omitempty"` // kept in config but not rendered
+}
+
 // Config holds every setting cobweb needs across its DHCP server, DNS
 // server, and web dashboard.
 type Config struct {
@@ -105,6 +135,12 @@ type Config struct {
 	SQMEnabled      bool `json:"sqm_enabled"`
 	SQMDownloadMbit int  `json:"sqm_download_mbit"`
 	SQMUploadMbit   int  `json:"sqm_upload_mbit"`
+
+	// Firewall. Off by default: when false, cobweb never touches
+	// nftables at all, so upgrading to a version with this feature
+	// changes nothing until it's deliberately switched on.
+	FirewallEnabled bool       `json:"firewall_enabled"`
+	PortRules       []PortRule `json:"port_rules"`
 
 	// Dashboard
 	ListenAddr string `json:"listen_addr"`
@@ -170,6 +206,7 @@ func Default(path string) *Config {
 		DNSMode:           "forward",
 		UpstreamServers:   []string{"1.1.1.1:53", "9.9.9.9:53"},
 		ListenAddr:        "0.0.0.0:8070",
+		PortRules:         []PortRule{},
 		Reservations:      []Reservation{},
 		DNSRecords:        []DNSRecord{},
 		Leases:            []Lease{},
@@ -314,6 +351,11 @@ func (c *Config) ImportJSON(data []byte) error {
 	c.SQMEnabled = parsed.SQMEnabled
 	c.SQMDownloadMbit = parsed.SQMDownloadMbit
 	c.SQMUploadMbit = parsed.SQMUploadMbit
+	c.FirewallEnabled = parsed.FirewallEnabled
+	c.PortRules = parsed.PortRules
+	if c.PortRules == nil {
+		c.PortRules = []PortRule{} // older exports predate this field
+	}
 	c.ListenAddr = parsed.ListenAddr
 	c.Reservations = parsed.Reservations
 	c.DNSRecords = parsed.DNSRecords
@@ -341,6 +383,8 @@ type Snapshot struct {
 	SQMEnabled        bool
 	SQMDownloadMbit   int
 	SQMUploadMbit     int
+	FirewallEnabled   bool
+	PortRules         []PortRule
 	ListenAddr        string
 	Reservations      []Reservation
 	DNSRecords        []DNSRecord
@@ -364,6 +408,8 @@ func (c *Config) Snapshot() Snapshot {
 		SQMEnabled:        c.SQMEnabled,
 		SQMDownloadMbit:   c.SQMDownloadMbit,
 		SQMUploadMbit:     c.SQMUploadMbit,
+		FirewallEnabled:   c.FirewallEnabled,
+		PortRules:         append([]PortRule{}, c.PortRules...),
 		ListenAddr:        c.ListenAddr,
 		Reservations:      append([]Reservation{}, c.Reservations...),
 		DNSRecords:        append([]DNSRecord{}, c.DNSRecords...),
@@ -662,6 +708,65 @@ func (c *Config) UpdateSQM(enabled bool, downloadMbit, uploadMbit int) error {
 	c.SQMDownloadMbit = downloadMbit
 	c.SQMUploadMbit = uploadMbit
 	return c.saveLocked()
+}
+
+// newRuleID generates a short, random, stable identifier for a PortRule,
+// same approach as newSegmentID.
+func newRuleID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return "rule-fallback"
+	}
+	return "rule-" + hex.EncodeToString(b)
+}
+
+// SetFirewallEnabled persists the master firewall switch. Like
+// UpdateSQM, this only stores the setting - applying it to the kernel is
+// the web handler's job, so config stays a pure data layer.
+func (c *Config) SetFirewallEnabled(enabled bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.FirewallEnabled = enabled
+	return c.saveLocked()
+}
+
+// AddPortRule appends a new rule. Its ID is generated here, ignoring
+// anything the caller supplied. Callers are expected to have validated
+// the rule already (see firewall.Validate) - config doesn't, to avoid a
+// dependency on the firewall package.
+func (c *Config) AddPortRule(r PortRule) (PortRule, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r.ID = newRuleID()
+	c.PortRules = append(c.PortRules, r)
+	return r, c.saveLocked()
+}
+
+// RemovePortRule deletes a rule by ID.
+func (c *Config) RemovePortRule(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.PortRules[:0]
+	for _, r := range c.PortRules {
+		if r.ID != id {
+			out = append(out, r)
+		}
+	}
+	c.PortRules = out
+	return c.saveLocked()
+}
+
+// SetPortRuleDisabled turns a rule off or on without deleting it.
+func (c *Config) SetPortRuleDisabled(id string, disabled bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.PortRules {
+		if c.PortRules[i].ID == id {
+			c.PortRules[i].Disabled = disabled
+			return c.saveLocked()
+		}
+	}
+	return fmt.Errorf("port rule %q not found", id)
 }
 
 // ParsePoolRangeForSegment returns the start and end of a segment's
