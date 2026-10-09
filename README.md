@@ -567,6 +567,11 @@ To let the tunnel in from outside:
 3. `systemctl enable --now wg-quick@wg0`. Don't use `AllowedIPs` wider than
    you need on the server side (each peer: just its own `10.8.0.x/32`).
 
+VPN clients can use this box as their DNS server (`DNS = 192.168.2.1` in the
+peer config). cobweb answers every query from the address it was sent to,
+which matters on a box with several interfaces: a client discards a reply
+that comes from a different address than the one it asked.
+
 Anyone holding a peer's private key gets the same access as a host on
 your LAN, so treat the keys like passwords and remove a peer when a phone
 is lost. On an iPhone, the WireGuard app's *On-Demand* setting can bring

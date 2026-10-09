@@ -74,23 +74,34 @@ func (s *Server) Run() error {
 	s.conn = conn
 	defer conn.Close()
 
+	if err := enablePktinfo(conn); err != nil {
+		// Still serves, but a client that asks one of this box's addresses
+		// may get its answer from another one and ignore it.
+		log.Printf("dns: can't pin reply addresses (%v); answers use the OS's choice of source", err)
+	}
+
 	status.SetDNS(true, nil)
 	log.Printf("dns: listening on :53")
 
 	buf := make([]byte, 512)
 	for {
-		n, clientAddr, err := conn.ReadFromUDP(buf)
+		n, clientAddr, local, err := readQuery(conn, buf)
 		if err != nil {
 			log.Printf("dns: read error: %v", err)
 			continue
 		}
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
-		go s.handle(msg, clientAddr)
+		go s.handle(msg, clientAddr, local)
 	}
 }
 
-func (s *Server) handle(msg []byte, clientAddr *net.UDPAddr) {
+// reply sends resp back to the client, from the local address it asked.
+func (s *Server) reply(resp []byte, clientAddr *net.UDPAddr, local net.IP) {
+	writeReply(s.conn, resp, clientAddr, local)
+}
+
+func (s *Server) handle(msg []byte, clientAddr *net.UDPAddr, local net.IP) {
 	q, err := parseQuestion(msg)
 	if err != nil {
 		return // malformed query, drop silently
@@ -98,12 +109,12 @@ func (s *Server) handle(msg []byte, clientAddr *net.UDPAddr) {
 
 	if ip, ok := s.lookupLocal(q.name); ok {
 		resp := buildAResponse(msg, q, []net.IP{ip}, 60)
-		s.conn.WriteToUDP(resp, clientAddr)
+		s.reply(resp, clientAddr, local)
 		return
 	}
 
 	if s.cfg.Snapshot().DNSMode == "recursive" && q.qtype == qTypeA {
-		s.handleRecursive(msg, q, clientAddr)
+		s.handleRecursive(msg, q, clientAddr, local)
 		return
 	}
 
@@ -115,18 +126,18 @@ func (s *Server) handle(msg []byte, clientAddr *net.UDPAddr) {
 		log.Printf("dns: forward failed for %q: %v", q.name, err)
 		return
 	}
-	s.conn.WriteToUDP(resp, clientAddr)
+	s.reply(resp, clientAddr, local)
 }
 
 // handleRecursive answers a query by walking the real DNS delegation
 // chain itself (see resolveIterative), checking the local cache first
 // so repeat lookups don't pay the multi-hop cost every time.
-func (s *Server) handleRecursive(msg []byte, q *question, clientAddr *net.UDPAddr) {
+func (s *Server) handleRecursive(msg []byte, q *question, clientAddr *net.UDPAddr, local net.IP) {
 	cacheKey := strings.ToLower(q.name) + "|A"
 
 	if ips, ok := s.cache.get(cacheKey); ok {
 		resp := buildAResponse(msg, q, ips, 60)
-		s.conn.WriteToUDP(resp, clientAddr)
+		s.reply(resp, clientAddr, local)
 		return
 	}
 
@@ -141,13 +152,13 @@ func (s *Server) handleRecursive(msg []byte, q *question, clientAddr *net.UDPAdd
 			log.Printf("dns: fallback forward also failed for %q: %v", q.name, fwdErr)
 			return
 		}
-		s.conn.WriteToUDP(resp, clientAddr)
+		s.reply(resp, clientAddr, local)
 		return
 	}
 
 	s.cache.set(cacheKey, answer.IPs, answer.TTL)
 	resp := buildAResponse(msg, q, answer.IPs, answer.TTL)
-	s.conn.WriteToUDP(resp, clientAddr)
+	s.reply(resp, clientAddr, local)
 }
 
 // lookupLocal checks manual DNS records first, then falls back to
